@@ -30,7 +30,6 @@ available_regressor_names = Dict(
     :nyiso_forecast_hud_valley => [Symbol("nyiso-hud_valley")],
     :nyiso_forecast_millwd => [Symbol("nyiso-millwd")],
 
-
     # Weather regressors.
     :heat_index => cols_starting("heat_index"),
     :relative_humidity => cols_containing("relative_humidity"),
@@ -51,6 +50,128 @@ available_regressor_names = Dict(
 )
 
 
+"""
+    feature_selection_demand(epochs, trial_count, learning_rate)
+
+Perform feature selection for electricity demand streams.
+
+# Arguments
+
+- `epochs`: The number of epochs to train the comparison models.
+- `trial_count`: The number of trials for each model configuration
+- `learning_rate`: The learning rate to use when training the
+feature comparison models.
+
+"""
+function feature_selection_demand(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    electricity_load_streams = collect(filter(x -> startswith(x, "electricity-load"), keys(Microprediction.get_sponsors(Microprediction.Config()))))
+
+    for stream_name in electricity_load_streams
+        for lag_interval in [1,3,12]
+
+            # FIXME: should only include the cities that are in
+            # the particular NYISO zone, otherwise there is a lot
+            # of noise.
+
+            nyiso_feature_name = replace(replace(stream_name, "electricity-load-nyiso-" => "nyiso_forecast_"), ".json" => "")
+            feature_selection(
+                stream_name=stream_name,
+                always_regressors=[
+                    :last_demand,
+                    :temperature,
+                    Symbol(nyiso_feature_name),
+                    ],
+                forecast_locations="city",
+                combination_lengths=0:2,
+                include_nyiso=false,
+                lag_interval=lag_interval,
+                trial_count=trial_count,
+                epochs=epochs,
+            )
+        end
+    end
+end
+
+
+"""
+    feature_selection_solar_power(epochs, trial_count, learning_rate)
+
+Perform feature selection for the solar power generation streams
+
+# Arguments
+
+- `epochs`: The number of epochs to train the comparison models.
+- `trial_count`: The number of trials for each model configuration
+- `learning_rate`: The learning rate to use when training the
+feature comparison models.
+
+"""
+function feature_selection_solar_power(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    for lag_interval in [1,3,12]
+        feature_selection(
+            stream_name="electricity-fueltype-nyiso-other_renewables.json",
+            always_regressors=[
+                :last_demand,
+                :low_cloud_cover,
+                :temperature],
+            forecast_locations="solar",
+            combination_lengths=0:2,
+            include_nyiso=false,
+            lag_interval=lag_interval,
+            trial_count=trial_count,
+            epochs=epochs,
+        )
+    end
+
+end
+
+
+"""
+    feature_selection_wind_power(epochs, trial_count, learning_rate)
+
+Perform feature selection for the wind power generation streams.
+
+# Arguments
+
+- `epochs`: The number of epochs to train the comparison models.
+- `trial_count`: The number of trials for each model configuration
+- `learning_rate`: The learning rate to use when training the
+feature comparison models.
+
+"""
+function feature_selection_wind_power(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    for lag_interval in [1,3,12]
+        feature_selection(
+            stream_name="electricity-fueltype-nyiso-wind.json",
+            always_regressors=[
+                :last_demand,
+                :average_wind_speed,
+                :wind_components,
+                :relative_humidity],
+            forecast_locations="wind",
+            combination_lengths=0:2,
+            include_nyiso=false,
+            lag_interval=lag_interval,
+            trial_count=trial_count,
+            epochs=epochs,
+        )
+    end
+end
+
+
+
 
 function regressor_names_to_columns(regressors, data)
     cols = colnames(data)
@@ -65,12 +186,80 @@ function regressor_names_to_columns(regressors, data)
     return map(handle_regressors, regressors)
 end
 
-struct FeatureComparisionResult
+"""
+    feature_selection(
+        stream_name,
+        forecast_locations,
+        epochs,
+        trial_count,
+        always_regressors,
+        learning_rate,
+        include_nyiso,
+        combination_lengths,
+        lag_interval)
+
+Perform feature selection by training multiple models and ranking
+their performance by the loss function on the set of test data.
+
+# Arguments
+
+- `stream_name`: The stream to perform feature selection on.
+- `forecast_locations`: The weather forecast locations to include
+   in the features.
+- `epochs`: The maximum number of epochs to train the models.
+- `trial_count`: The number of individual models trained for each
+configuration.  This will attempt to smooth out the randomness of
+initialization.
+- `always_regressors`: An array of regressors that will always be
+selected for inclusion.
+- `learning_rate`: The learning rate used for the model training.
+- `include_nyiso`: Include the NYISO load forecasts.
+- `combination_lengths`: An array of combination lengths to try.
+- `lag_interval`: The forecast lag interval.
+
+"""
+function feature_selection(;
+    stream_name::String,
+    forecast_locations::String,
+    epochs::Number=100,
+    trial_count::Number=1,
+    always_regressors::Array{Symbol,1},
+    learning_rate::Float64=0.001,
+    include_nyiso::Bool=false,
+    combination_lengths,
+    lag_interval::Number=12)
+
+    # The regressors that are important
+    stream = loadStream(stream_name=stream_name,
+                        zscore_features=true,
+                        forecast_locations=forecast_locations,
+                        lag_interval=lag_interval)
+
+    optional_regressors = setdiff(keys(available_regressor_names), always_regressors)
+
+    # Filter out nyiso
+    if include_nyiso == false
+        optional_regressors = filter(x -> !startswith(String(x), "nyiso"), optional_regressors)
+    end
+
+    feature_comparison = compareFeaturePerformance(;
+        stream=stream,
+        always_regressor_names=always_regressors,
+        optional_regressor_names=collect(optional_regressors),
+        distribution=parameterizedDistributionForStream(stream_name, lag_interval),
+        combo_lengths=combination_lengths,
+        epochs=epochs,
+        trial_count=trial_count,
+        learning_rate=learning_rate)
+
+    serialize("feature-selection-$(stream_name)-$(lag_interval).binary", feature_comparison)
+end
+
+struct FeatureComparisonResult
     regressors::Array{Symbol,1}
     average_loss::Float64
     minimum_loss::Float64
 end
-
 
 """
     compareFeaturePerformance(
@@ -99,7 +288,7 @@ function compareFeaturePerformance(;
     distribution,
     early_stopping_limit::Number=20,
     epochs::Number=1000,
-    learning_rate::Float64=0.01)::Array{FeatureComparisionResult,1}
+    learning_rate::Float64=0.01)::Array{FeatureComparisonResult,1}
     # The point here is to try various combinations of regressors.
     # and figure out the most accurate model, this variable controls
     # how many different regressors will be tried at the same time.
