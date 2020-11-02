@@ -85,6 +85,7 @@ function feature_selection_demand(;
                     :temperature,
                     Symbol(nyiso_feature_name),
                     ],
+                never_regressors=convert(Array{Symbol,1}, []),
                 forecast_locations="city",
                 combination_lengths=0:2,
                 include_nyiso=false,
@@ -122,6 +123,10 @@ function feature_selection_solar_power(;
                 :last_demand,
                 :low_cloud_cover,
                 :temperature],
+            never_regressors=[
+                    :daily_cycle,
+                    :weekly_cycle
+                ],
             forecast_locations="solar",
             combination_lengths=0:2,
             include_nyiso=false,
@@ -160,6 +165,10 @@ function feature_selection_wind_power(;
                 :average_wind_speed,
                 :wind_components,
                 :relative_humidity],
+            never_regressors=[
+                :daily_cycle,
+                :weekly_cycle
+            ],
             forecast_locations="wind",
             combination_lengths=0:2,
             include_nyiso=false,
@@ -170,8 +179,51 @@ function feature_selection_wind_power(;
     end
 end
 
+"""
+    feature_selection_generation(epochs, trial_count, learning_rate)
 
+Perform feature selection for all of the generation streams.
 
+# Arguments
+
+- `epochs`: The number of epochs to train the comparison models.
+- `trial_count`: The number of trials for each model configuration
+- `learning_rate`: The learning rate to use when training the
+feature comparison models.
+
+"""
+function feature_selection_generation(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    generation_streams = filter(x -> startswith(x, "electricity-fueltype"), keys(Microprediction.get_sponsors(Microprediction.Config())))
+
+    for lag_interval in [1, 3, 12]
+        for stream_name in generation_streams
+            if stream_name == "electricity-fueltype-nyiso-other_renewables.json"
+                feature_selection_solar_power(epochs=epochs, trial_count=trial_count, learning_rate=learning_rate)
+            elseif stream_name == "electricity-fueltype-nyiso-wind.json"
+                feature_selection_wind_power(epochs=epochs, trial_count=trial_count, learning_rate=learning_rate)
+            else
+                feature_selection(;
+                    stream_name=stream_name,
+                    always_regressors=[
+                        :last_demand,
+                        :temperature,
+                    ],
+                    never_regressors=convert(Array{Symbol,1}, []),
+                    forecast_locations="city",
+                    combination_lengths=0:2,
+                    include_nyiso=false,
+                    lag_interval=lag_interval,
+                    trial_count=trial_count,
+                    epochs=epochs,
+                )
+            end
+        end
+    end
+end
 
 function regressor_names_to_columns(regressors, data)
     cols = colnames(data)
@@ -224,6 +276,7 @@ function feature_selection(;
     epochs::Number=100,
     trial_count::Number=1,
     always_regressors::Array{Symbol,1},
+    never_regressors::Array{Symbol,1}=[],
     learning_rate::Float64=0.001,
     include_nyiso::Bool=false,
     combination_lengths,
@@ -236,6 +289,8 @@ function feature_selection(;
                         lag_interval=lag_interval)
 
     optional_regressors = setdiff(keys(available_regressor_names), always_regressors)
+
+    optional_regressors = setdiff(optional_regressors, never_regressors)
 
     # Filter out nyiso
     if include_nyiso == false
@@ -286,7 +341,7 @@ function compareFeaturePerformance(;
     combo_lengths,
     trial_count::Number=16,
     distribution,
-    early_stopping_limit::Number=20,
+    early_stopping_limit::Number=10,
     epochs::Number=1000,
     learning_rate::Float64=0.01)::Array{FeatureComparisonResult,1}
     # The point here is to try various combinations of regressors.
