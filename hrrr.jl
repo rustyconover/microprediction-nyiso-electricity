@@ -80,11 +80,10 @@ function parseAndSerializeGRIBFile(filename, fixed_date, zero_padded_forecast_ho
 
         if !isfile(parse_offset_filename)
             parse_offsets = learnH3GribIndexes(filename, indexes, bounds, forecast_products)
-            println(parse_offsets);
             serialize(parse_offset_filename, parse_offsets);
-        else
-            parse_offsets::Dict{UInt32,UInt32} = deserialize(parse_offset_filename)
         end
+
+        parse_offsets::Dict{UInt32,UInt32} = deserialize(parse_offset_filename)
 
         forecasts = parseGRIBFile(
             filename,
@@ -103,7 +102,6 @@ function parseAndSerializeGRIBFile(filename, fixed_date, zero_padded_forecast_ho
 
         for index in 1:length(indexes)
             wind_values = map(x -> sqrt.(sum(x.^2)), zip(u_component[index], v_component[index]))
-
             push!(average_wind_speed, [mean(wind_values)])
             push!(minimum_wind_speed, [minimum(wind_values)])
             push!(maximum_wind_speed, [maximum(wind_values)])
@@ -174,6 +172,10 @@ function serializedHRRRForecastForTime(target::DateTime, forecast_locations::Str
     end
 end
 
+function regressor_name_for_forecast_product(product, location_name::String)::Symbol
+    Symbol(lowercase("hrrr_$(replace(product["name"], " " => "_"))_$(haskey(product, "level") ? product["level"] : 0)_$(location_name)"))
+end
+
 """
     latestHRRRForecastForTime(target, forecast_locations)
 
@@ -226,7 +228,7 @@ library(weathermetrics)
 
         symbol_names = Array{Symbol,1}(undef, length(first_produced_product[2]))
         for (index, value) in enumerate(zip(first_produced_product[2], second_produced_product[2]))
-            field_name = Symbol(lowercase("$(replace(product["name"], " " => "_"))_$(haskey(product, "level") ? product["level"] : 0)_$(location_names[index])"))
+            field_name = regressor_name_for_forecast_product(product, location_names[index])
 
             if haskey(field_values, field_name) == false
                 field_values[field_name] = Array{Float64,1}(undef, length(interpolation_range))
@@ -244,15 +246,15 @@ library(weathermetrics)
 
     # Calculate the heat index from the temperature and relative humidity.
     for name in location_names
-        temp = field_values[Symbol("temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("temperature_0_$(name)")])
-        humidity = field_values[Symbol("relative_humidity_0_$(name)")]
+        temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
+        humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
 
         R"""
     heat_index_result <- heat.index($temp, rh=$humidity)
     """
         @rget heat_index_result
 
-        field_values[Symbol("heat_index_0_$(name)")] = heat_index_result
+        field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
     end
 
     return TimeArray(namedtuple(field_values), timestamp=:datetime)
@@ -286,9 +288,7 @@ function liveSerializedHRRRForDateTime(forecast_date::DateTime, forecast_offset:
         return nothing
     end
 
-    println("Getting $(full_url)")
     res = HTTP.request(:GET, full_url; pipeline_limit=1, connection_limit=4, verbose=1, status_exception=false, readtimeout=3, retry=true)
-    println("Status is $(res.status)")
     if res.status != 200
         # Cache the missing file for 10 minutes.
         cached_hrrr_404[full_url] = now() + Dates.Minute(10)
@@ -431,7 +431,7 @@ library(weathermetrics)
 
             symbol_names = Array{Symbol,1}(undef, length(first_produced_product[2]))
             for (index, value) in enumerate(zip(first_produced_product[2], second_produced_product[2]))
-                field_name = Symbol(lowercase("$(replace(product["name"], " " => "_"))_$(haskey(product, "level") ? product["level"] : 0)_$(location_names[index])"))
+                field_name = regressor_name_for_forecast_product(product, location_names[index])
 
                 if haskey(field_values, field_name) == false
                     field_values[field_name] = Array{Float64,1}(undef, length(interpolation_range) * length(available_files))
@@ -451,15 +451,15 @@ library(weathermetrics)
 
     # Calculate the heat index from the temperature and relative humidity.
     for name in location_names
-        temp = field_values[Symbol("temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("temperature_0_$(name)")])
-        humidity = field_values[Symbol("relative_humidity_0_$(name)")]
+        temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
+        humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
 
         R"""
     heat_index_result <- heat.index($temp, rh=$humidity)
     """
         @rget heat_index_result
 
-        field_values[Symbol("heat_index_0_$(name)")] = heat_index_result
+        field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
     end
 
     return TimeArray(namedtuple(field_values), timestamp=:datetime)

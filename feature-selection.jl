@@ -34,13 +34,13 @@ available_regressor_names = Dict(
     :heat_index => cols_starting("heat_index"),
     :relative_humidity => cols_containing("relative_humidity"),
     :surface_pressure => cols_containing("surface_pressure"),
-    :temperature => cols_starting("temperature"),
+    :temperature => cols_starting("hrrr_temperature"),
     :dewpoint_temperature => cols_starting("2_metre_dewpoint"),
     :average_wind_speed => cols_containing("average_wind_speed"),
     :maximum_wind_speed => cols_containing("maximum_wind_speed"),
     :minimum_wind_speed => cols_containing("minimum_wind_speed"),
     :wind_components => cols_containing("wind_component"),
-
+    :downward_short_wave_radiation => cols_starting("hrrr_downward"),
     :total_cloud_cover => cols_containing("total_cloud_cover"),
     :low_cloud_cover => cols_containing("low_cloud_cover"),
     :high_cloud_cover => cols_containing("high_cloud_cover"),
@@ -88,6 +88,7 @@ function feature_selection_demand(;
                 never_regressors=convert(Array{Symbol,1}, []),
                 forecast_locations="city",
                 combination_lengths=0:2,
+                filter_locations=contains(stream_name, "overall") ? false : true,
                 include_nyiso=false,
                 lag_interval=lag_interval,
                 trial_count=trial_count,
@@ -167,7 +168,15 @@ function feature_selection_wind_power(;
                 :relative_humidity],
             never_regressors=[
                 :daily_cycle,
-                :weekly_cycle
+                :weekly_cycle,
+
+                :downward_short_wave_radiation,
+                :total_cloud_cover,
+                :low_cloud_cover,
+                :high_cloud_cover,
+                :medium_cloud_cover,
+                :visible_diffuse_downward_solar_flux,
+                :visible_beam_downward_solar_flux,
             ],
             forecast_locations="wind",
             combination_lengths=0:2,
@@ -277,6 +286,7 @@ function feature_selection(;
     trial_count::Number=1,
     always_regressors::Array{Symbol,1},
     never_regressors::Array{Symbol,1}=[],
+    filter_locations::Bool=false,
     learning_rate::Float64=0.001,
     include_nyiso::Bool=false,
     combination_lengths,
@@ -297,11 +307,46 @@ function feature_selection(;
         optional_regressors = filter(x -> !startswith(String(x), "nyiso"), optional_regressors)
     end
 
+    # Sub-filter the locations base on the stream name.
+    if forecast_locations == "city" && filter_locations == true
+
+        println(stream_name)
+        bad_suffixes = Set()
+        for location in city_weather_stations
+            if !(stream_name in location[4])
+                push!(bad_suffixes, get_location_name(location))
+            else
+                println("Good suffix: $(get_location_name(location))")
+            end
+        end
+        println("Bad suffixes")
+        println(bad_suffixes)
+
+        filter_regressors = function (regressor_full_name)
+
+            # only filter regressors from the hrrr forecast
+            if !startswith(String(regressor_full_name), "hrrr")
+                return true
+            end
+
+            for suffix in bad_suffixes
+                if endswith(String(regressor_full_name), suffix)
+                    return false
+                end
+            end
+            return true
+        end
+    else
+        filter_regressors = (regressor_full_name) -> true
+    end
+
+
     feature_comparison = compareFeaturePerformance(;
         stream=stream,
         always_regressor_names=always_regressors,
         optional_regressor_names=collect(optional_regressors),
-        distribution=parameterizedDistributionForStream(stream_name, lag_interval),
+        filter_regressors=filter_regressors,
+        distribution=parameterizedDistribution(values(stream[1][:Demand_diff])),
         combo_lengths=combination_lengths,
         epochs=epochs,
         trial_count=trial_count,
@@ -338,12 +383,15 @@ function compareFeaturePerformance(;
     stream,
     always_regressor_names::Array{Symbol,1},
     optional_regressor_names::Array{Symbol,1},
+    filter_regressors,
     combo_lengths,
     trial_count::Number=16,
     distribution,
     early_stopping_limit::Number=10,
+    batchsize::Number=256,
     epochs::Number=1000,
     learning_rate::Float64=0.01)::Array{FeatureComparisonResult,1}
+
     # The point here is to try various combinations of regressors.
     # and figure out the most accurate model, this variable controls
     # how many different regressors will be tried at the same time.
@@ -361,8 +409,9 @@ function compareFeaturePerformance(;
             ])
 
         idea_column_names = regressor_names_to_columns(idea, stream[1])
-        all_regressors = sort(collect(union(idea_column_names...)))
+        all_regressors = filter(filter_regressors, sort(collect(union(idea_column_names...))))
 
+        println("All regressors: $(all_regressors)")
         # Training and test data need to be split, but they shouldn't be chronologially ordered.
         # because if only the recent data was used, it means that the model would be temporally
         # sensitive.
@@ -385,8 +434,8 @@ function compareFeaturePerformance(;
 
         regressor_list = sort(map(String, idea))
 
-        training_loader = Flux.Data.DataLoader(viewize(train_x), train_y, batchsize=32, shuffle=true)
-        test_loader = Flux.Data.DataLoader(viewize(test_x), test_y, batchsize=32, shuffle=true)
+        training_loader = Flux.Data.DataLoader(viewize(train_x), train_y, batchsize=batchsize, shuffle=true)
+        test_loader = Flux.Data.DataLoader(viewize(test_x), test_y, batchsize=batchsize, shuffle=true)
 
         model_builder = (input_count, activation, l1_regularization, l2_regularization) ->
             Chain(
@@ -434,11 +483,11 @@ function compareFeaturePerformance(;
         minimum_loss = trials[1].best_test_loss
         best_model = trials[1].model
 
-    #     push!(results,
-    #         FeatureComparisionResult(
-    #            trials[1].regressors,
-    #             average_loss,
-    #             minimum_loss))
+        push!(results,
+            FeatureComparisonResult(
+                trials[1].regressors,
+                 average_loss,
+                 minimum_loss))
     end
 
     results = sort(results, by=x -> x.average_loss)
@@ -450,3 +499,47 @@ function compareFeaturePerformance(;
     end
     return results
 end
+
+"""
+    summarizeFeatureSelection(top_n_trials, top_n_regressors, stream_names)
+
+Summarize the results of feature selection runs for a set of streams, by counting
+the number of times each regressor appears in the top_n_trails of feature selection.
+
+# Arguments
+
+- `top_n_trials`: The number of top feature selection trials to consider.
+- `top_n_regressors`: The number of regressors to include from the feature selection trial.
+- `stream_names`: The list of stream names to consider.
+
+"""
+function summarizeFeatureSelection(
+    top_n_trials::Number,
+    top_n_regressors::Number,
+    stream_names
+    )::Dict{Number,Array{Symbol,1}}
+    top_regressors_per_interval::Dict{Number,Array{Symbol,1}} = Dict()
+    for lag_interval in [1, 3, 12]
+
+        println("Lag interval: $(lag_interval)")
+        regressor_usage = []
+
+        for stream_name in stream_names
+            data = deserialize("feature-selection-$(stream_name)-$(lag_interval).binary")
+
+            for result in 1:top_n_trials
+                record = data[result]
+                push!(regressor_usage, record.regressors)
+            end
+        end
+
+        regressor_usage = sort(collect(countmap(reduce(vcat, regressor_usage))), by=x -> x[2], rev=true)
+
+        top_regressors_per_interval[lag_interval] = map(x -> x[1], regressor_usage[1:top_n_regressors])
+    end
+
+    return top_regressors_per_interval
+end
+
+
+#    demand_streams = filter(x -> startswith(x, "electricity-load"), keys(Microprediction.get_sponsors(Microprediction.Config())))

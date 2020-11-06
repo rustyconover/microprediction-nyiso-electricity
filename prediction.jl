@@ -92,22 +92,49 @@ function runSavedModel(;
 
     mu = model_result[1]
     std = softplus(model_result[2])
+
     distribution = saved_model[:distribution](mu, std)
 
     reverse_z(v, stat) = (v * stat[2]) + stat[1]
 
     # Now do the trick by iterating across the quantile function
     # thanks Peter.
-    smidge = 1 / number_of_points + 2
+    smidge = 1 / (number_of_points + 2)
     points = map(x -> reverse_z(quantile(distribution, x), saved_model[:stats][:Demand_diff]) + latest_value, smidge:smidge:1 - (smidge * 2))
 
-    println("$(saved_model[:stream]) Lag=$(lag_interval) Latest value=$(latest_value) diff=(mu: $(mu) std: $(std)) points=$(mean_and_std(points)) rounded=$(mean_and_std(round.(points)))")
+    points_stats = mean_and_std(points)
+    @printf "%s lag=%d latest=%f mu=%.2f std=%.2f points mu=%.2f std=%.2f\n" saved_model[:stream] lag_interval latest_value mu std points_stats[1] points_stats[2]
 
     return Dict(
         :stream_name => saved_model[:stream],
         :points => points)
 end
 
+
+function makeDemandStreams()
+    all_demand_streams = [
+        "electricity-load-nyiso-north.json",
+        "electricity-load-nyiso-overall.json",
+        # "electricity-load-nyiso-centrl.json"
+        # "electricity-load-nyiso-hud_valley.json"
+        # "electricity-load-nyiso-millwd.json"
+        # "electricity-load-nyiso-mhk_valley.json"
+        # "electricity-load-nyiso-nyc.json"
+        # "electricity-load-nyiso-capitl.json"
+        # "electricity-load-nyiso-genese.json"
+        # "electricity-load-nyiso-west.json"
+        # "electricity-load-nyiso-dunwod.json"
+        # "electricity-load-nyiso-longil.json"
+    ]
+
+    for stream_name in all_demand_streams
+        build_demand_stream(
+            stream_name=stream_name,
+            save_filename_prefix="demand-$(stream_name)",
+            max_epochs=50)
+    end
+
+end
 
 """
     runSavedModels(write_key)
@@ -120,22 +147,46 @@ function runSavedModels(write_key::String="8f0fb3ce57cb67498e3790f9d64dd478")
     while true
 #        println("$(now()) Starting prediction run")
 #        println("Doing solar")
-#        submit_running_model(save_filename_prefix="production-solar3", stream_update_interval=Dates.Minute(5), stream_name="electricity-fueltype-nyiso-other_renewables.json")
+
+        all_demand_streams = [
+            "electricity-load-nyiso-overall.json",
+            "electricity-load-nyiso-north.json",
+            "electricity-load-nyiso-centrl.json",
+            "electricity-load-nyiso-hud_valley.json",
+            "electricity-load-nyiso-millwd.json",
+            "electricity-load-nyiso-mhk_valley.json",
+            "electricity-load-nyiso-nyc.json",
+            "electricity-load-nyiso-capitl.json",
+            "electricity-load-nyiso-genese.json",
+            "electricity-load-nyiso-west.json",
+            "electricity-load-nyiso-dunwod.json",
+            "electricity-load-nyiso-longil.json",
+        ]
+
+        for stream_name in all_demand_streams
+            submitSavedModelPrediction(
+                write_key=write_key,
+                save_filename_prefix="demand-$(stream_name)",
+                stream_update_interval=Dates.Minute(5),
+                stream_name=stream_name)
+        end
+
+
 #        println("Doing wind")
 #        submit_running_model(save_filename_prefix="production-wind3", stream_update_interval=Dates.Minute(5), stream_name="electricity-fueltype-nyiso-wind.json")
 
 #        println("Doing overall")
 #        submit_running_model(save_filename_prefix="production-load-overall-no-exp", stream_update_interval=Dates.Minute(5), stream_name="electricity-load-nyiso-overall.json")
 
-        streams = [
-             "electricity-fueltype-nyiso-other_renewables.json",
-             "electricity-fueltype-nyiso-wind.json",
-             "electricity-load-nyiso-overall.json",
-         ]
-        for stream in streams
-            cancelPredictions(write_key=write_key, stream_name=stream)
-        end
-        println("$(now()) all done")
+        # streams = [
+        #      "electricity-fueltype-nyiso-other_renewables.json",
+        #      "electricity-fueltype-nyiso-wind.json",
+        #      "electricity-load-nyiso-overall.json",
+        #  ]
+        # for stream in streams
+        #     cancelPredictions(write_key=write_key, stream_name=stream)
+        # end
+        # println("$(now()) all done")
         sleep(60 * 5)
     end
 end
@@ -156,7 +207,7 @@ function submitSavedModelPrediction(;
     # Send the prediction in.
     write_config = Microprediction.Config(write_key)
 
-    for (lag_interval, competition_delays) in lag_interval_to_competition
+    for (lag_interval, competition_delays) in sort(collect(lag_interval_to_competition))
         output = runSavedModel(save_filename_prefix=save_filename_prefix,
                     lag_interval=lag_interval,
                     stream_update_interval=stream_update_interval,

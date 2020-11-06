@@ -88,43 +88,57 @@ solar_generation_sites = [
 
 # City based weather stations.
 city_weather_stations = [
-    ("Albany", 42.6525, -73.757222),
-    ("Watertown", 43.975556, -75.906389),
-    ("Binghampton", 42.102222, -75.911667),
-    ("Buffalo", 42.904722, -78.849444),
-    ("Elmira", 42.093889, -76.809722),
-    ("White Plains", 41.04, -73.778611),
-    ("Islip", 40.756667, -73.198889),
-    ("JFK", 40.639722, -73.778889),
-    ("LGA", 40.77725, -73.872611),
-    ("Massena", 44.930278, -74.8925),
-    ("Monticello", 41.653611, -74.690556),
-    ("Plattsburgth", 44.695278, -73.458333),
-    ("Poughkeepsie", 41.7, -73.93),
-    ("Rochester", 43.165556, -77.611389),
-    ("Newburgh", 41.519722, -74.021389),
-    ("Syracuse", 43.046944, -76.144444),
-    ("Rome", 43.219444, -75.463333),
-    ("Utica", 43.0970142,  -75.2279416)
+    ("Albany", 42.6525, -73.757222, ["electricity-load-nyiso-capitl.json"]),
+    ("Binghampton", 42.102222, -75.911667, ["electricity-load-nyiso-centrl.json"]),
+    ("Buffalo", 42.904722, -78.849444, ["electricity-load-nyiso-west.json"]),
+    ("Canandaigua", 42.8875, -77.281667, ["electricity-load-nyiso-genese.json"]),
+    ("Elmira", 42.093889, -76.809722, ["electricity-load-nyiso-centrl.json"]),
+    ("White Plains", 41.04, -73.778611, ["electricity-load-nyiso-millwd.json", "electricity-load-nyiso-dunwod.json"]),
+    ("Islip", 40.756667, -73.198889, ["electricity-load-nyiso-longil.json"]),
+    ("JFK", 40.639722, -73.778889, ["electricity-load-nyiso-nyc.json"]),
+    ("Jamestown", 42.095556, -79.238611, ["electricity-load-nyiso-west.json"]),
+    ("Fredonia", 42.440833, -79.333889, ["electricity-load-nyiso-west.json"]),
+    ("NYC", 40.748817, -73.985428, ["electricity-load-nyiso-nyc.json"]),
+    ("LGA", 40.77725, -73.872611, ["electricity-load-nyiso-nyc.json"]),
+    ("Staten Island", 40.571944, -74.146944, ["electricity-load-nyiso-nyc.json"]),
+    ("Massena", 44.930278, -74.8925, ["electricity-load-nyiso-mhk_valley.json"]),
+    ("Monticello", 41.653611, -74.690556, ["electricity-load-nyiso-mhk_valley.json"]),
+    ("Plattsburgth", 44.695278, -73.458333, ["electricity-load-nyiso-north.json"]),
+    ("Poughkeepsie", 41.7, -73.93, ["electricity-load-nyiso-hud_valley.json"]),
+    ("Rochester", 43.165556, -77.611389, ["electricity-load-nyiso-genese.json"]),
+    ("Newburgh", 41.519722, -74.021389, ["electricity-load-nyiso-hud_valley.json"]),
+    ("Schenectady", 42.814167, -73.937222, ["electricity-load-nyiso-capitl.json"]),
+    ("Syracuse", 43.046944, -76.144444, ["electricity-load-nyiso-centrl.json"]),
+    ("Rome", 43.219444, -75.463333, ["electricity-load-nyiso-mhk_valley.json"]),
+    ("Utica", 43.0970142,  -75.2279416, ["electricity-load-nyiso-mhk_valley.json"]),
+    ("Watertown", 43.975556, -75.906389, ["electricity-load-nyiso-mhk_valley.json"]),
 ];
-
 
 
 # This is the resolution of the H3 indexes to use when aggregating weather
 # forecast information.
 #
 # https://github.com/uber/h3/blob/master/docs/core-library/restable.md
-#
-# The hexagons will be about 252 km^2, or around 97 mi^2 or about 9.84 miles a side
-# if the hexagon was a rectangle.
-#
-SITE_H3_RESOLUTION = 5
+##
+SITE_H3_RESOLUTION = 6
 
 # H3 likes to use radians rather than degrees for its coordinates, so provide some conversions.
 deg_to_rad(x) = x * pi / 180
 rad_to_deg(x) = x * 180 / pi
 location_to_h3_index(x) = H3.API.geoToH3(H3.Lib.GeoCoord(deg_to_rad(x[2]), deg_to_rad(x[3])), SITE_H3_RESOLUTION)
 get_location_name(x) = lowercase(replace(x[1], " " => "_"))
+
+# Check for duplicates
+function check_duplicates()
+    seen_locations = Set()
+    for location in city_weather_stations
+        l = location_to_h3_index(location)
+        if l in seen_locations
+            println("Duplicate", location)
+        end
+        push!(seen_locations, l)
+    end
+end
 
 # Store all of the location collections. so they can be easily referenced later on as needed
 all_locations = Dict(
@@ -295,7 +309,7 @@ imputed <- na_interpolation($stream_values)
 
     # Remove rows where the HRRR forecast isn't present, because there wouldn't
     # be enough inputs to the model.
-    merged_stream = merged_stream[findwhen(merged_stream[Symbol("heat_index_0_$(get_location_name(all_locations[forecast_locations][1]))")] .!== missing)]
+    merged_stream = merged_stream[findwhen(merged_stream[Symbol("hrrr_temperature_0_$(get_location_name(all_locations[forecast_locations][1]))")] .!== missing)]
 
     # Remove rows where the lagged value isn't present, because its a required
     # input to the model.
@@ -367,13 +381,6 @@ model_architectures = [
         RegularizedDense(Dense(64, 32, activation), 0, 0),
         Dense(32, 2)
     )),
-    ("128l1-128-128", (input_count, activation, l1_regularization, l2_regularization) ->
-    Chain(
-        RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
-        RegularizedDense(Dense(128, 128, activation), 0, 0),
-        RegularizedDense(Dense(128, 128, activation), 0, 0),
-        Dense(128, 2)
-    )),
     ("128l1-128-128-128", (input_count, activation, l1_regularization, l2_regularization) ->
     Chain(
         RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
@@ -393,31 +400,6 @@ model_architectures = [
     Chain(
         RegularizedDense(Dense(input_count, 256, activation), l1_regularization, l2_regularization),
         RegularizedDense(Dense(256, 64, activation), 0, 0),
-        RegularizedDense(Dense(64, 32, activation), 0, 0),
-        Dense(32, 2)
-    )),
-    ("256l1-128-64-32", (input_count, activation, l1_regularization, l2_regularization) ->
-    Chain(
-        RegularizedDense(Dense(input_count, 256, activation), l1_regularization, l2_regularization),
-        RegularizedDense(Dense(256, 128, activation), 0, 0),
-        RegularizedDense(Dense(128, 64, activation), 0, 0),
-        RegularizedDense(Dense(64, 32, activation), 0, 0),
-        Dense(32, 2)
-    )),
-    ("128l1-64-64-32", (input_count, activation, l1_regularization, l2_regularization) ->
-    Chain(
-        RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
-        RegularizedDense(Dense(128, 64, activation), 0, 0),
-        RegularizedDense(Dense(64, 64, activation), 0, 0),
-        RegularizedDense(Dense(64, 32, activation), 0, 0),
-        Dense(32, 2)
-    )),
-    ("128l1-64-d0.05-64-32", (input_count, activation, l1_regularization, l2_regularization) ->
-    Chain(
-        RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
-        RegularizedDense(Dense(128, 64, activation), 0, 0),
-        Dropout(0.05),
-        RegularizedDense(Dense(64, 64, activation), 0, 0),
         RegularizedDense(Dense(64, 32, activation), 0, 0),
         Dense(32, 2)
     )),
@@ -475,7 +457,6 @@ function build_wind_power(;
     return buildModel(
         stream_name=stream_name,
         forecast_locations=forecast_locations,
-        distribution=DistributionsAD.Laplace,
         regressors=[
             ["last_demand", Set([:Demand_lag])],
             ["average_wind_speed", Set(filter(x -> contains(String(x), "average_wind_speed"), colnames(stream[1])))],
@@ -489,37 +470,77 @@ function build_wind_power(;
 end
 
 
-function build_overall_demand_power(;
-    save_filename_prefix,
-    max_epochs=1000,
-    trial_count=1,
-    lag_intervals=[1, 3, 12])
+function build_demand_stream(;
+    stream_name::String,
+    save_filename_prefix::String,
+    max_epochs::Number=1000,
+    trial_count::Number=1)
 
-    stream_name="electricity-load-nyiso-overall.json"
     forecast_locations="city"
+
 
     # Load the stream so that the symbol names of the regressors can be filtered.
     stream = loadStream(stream_name=stream_name,
         zscore_features=true,
         forecast_locations=forecast_locations,
-        lag_interval=lag_intervals[1])
+        lag_interval=1)
+
+    summarized_feature_selection = collect(summarizeFeatureSelection(3, 5, [stream_name]))
+
+    for (lag_interval, regressors) in summarized_feature_selection
+        println("Lag: $(lag_interval) regressors: $(regressors)")
+    end
+    feature_selection_preferred = Dict(
+        map(x -> Pair(x[1], collect(union(regressor_names_to_columns(x[2], stream[1])...))),
+        summarized_feature_selection))
+
+    # Now filter by city if not overall.
+    if forecast_locations == "city" && !contains(stream_name, "overall")
+        println(stream_name)
+        bad_suffixes = Set()
+        for location in city_weather_stations
+            if !(stream_name in location[4])
+                push!(bad_suffixes, get_location_name(location))
+            else
+                println("Good suffix: $(get_location_name(location))")
+            end
+        end
+        println("Bad suffixes")
+        println(bad_suffixes)
+
+        filter_regressors = function (regressor_full_name)
+
+            # only filter regressors from the hrrr forecast
+            if !startswith(String(regressor_full_name), "hrrr")
+                return true
+            end
+
+            for suffix in bad_suffixes
+                if endswith(String(regressor_full_name), suffix)
+                    return false
+                end
+            end
+            return true
+        end
+    else
+        filter_regressors = (regressor_full_name) -> true
+    end
+
+    filtered_regressors::Dict{Number,Array{Symbol,1}} = Dict()
+    for (lag_interval, all_feature_names) in feature_selection_preferred
+        filtered_regressors[lag_interval] = filter(filter_regressors, all_feature_names)
+    end
+
+    println(filtered_regressors)
 
     return buildModel(
         stream_name=stream_name,
         forecast_locations=forecast_locations,
-        distribution=DistributionsAD.Normal,
-        regressors=[
-            ["last_demand", Set([:Demand_lag])],
-            ["daily_cycle", Set([:sin_288, :cos_288])],
-            ["weekly_cycle", Set([:sin_2016, :cos_2016])],
-            ["nyiso_forecast", Set([Symbol("nyiso-overall")])],
-            ["relative_humidity", Set(filter(x -> contains(String(x), "relative_humidity"), colnames(stream[1])))],
-            ["temperature", Set(filter(x -> startswith(String(x), "temperature"), colnames(stream[1])))],
-        ],
+        regressors_by_lag_interval=filtered_regressors,
         max_epochs=max_epochs,
         trial_count=trial_count,
-        lag_intervals=lag_intervals,
         save_filename_prefix=save_filename_prefix)
+
 end
 
 
@@ -546,6 +567,7 @@ function build_solar_power(;
     max_epochs=1000,
     trial_count=1,
     lag_intervals=[1, 3, 12])
+
     stream_name="electricity-fueltype-nyiso-other_renewables.json"
     forecast_locations="solar"
 
@@ -555,22 +577,20 @@ function build_solar_power(;
         forecast_locations=forecast_locations,
         lag_interval=lag_intervals[1])
 
+
+    summarized_feature_selection = collect(summarizeFeatureSelection(3, 5, [stream_name]))
+
+    feature_selection_preferred = Dict(
+        map(x -> Pair(x[1], collect(union(regressor_names_to_columns(x[2], stream[1])...))),
+        summarized_feature_selection))
+
+
     return buildModel(
         stream_name=stream_name,
         forecast_locations=forecast_locations,
-        distribution=DistributionsAD.Normal,
-        regressors=[
-            ["last_demand", Set([:Demand_lag])],
-            ["low_cloud_cover", Set(filter(x -> contains(String(x), "low_cloud_cover"), colnames(stream[1])))],
-            ["temperature", Set(filter(x -> startswith(String(x), "temperature"), colnames(stream[1])))],
-#            ["2_meter_dewpoint_temperature", Set(filter(x -> startswith(String(x), "2_metre_dewpoint"), colnames(stream[1])))],
-            ["high_cloud_cover", Set(filter(x -> contains(String(x), "high_cloud_cover"), colnames(stream[1])))],
-            ["surface_pressure", Set(filter(x -> contains(String(x), "surface_pressure"), colnames(stream[1])))],
-            ["visible_diffuse_downward_solar_flux", Set(filter(x -> contains(String(x), "visible_diffuse_downward_solar_flux"), colnames(stream[1])))],
-        ],
+        regressors_by_lag_interval=feature_selection_preferred,
         max_epochs=max_epochs,
         trial_count=trial_count,
-        lag_intervals=lag_intervals,
         save_filename_prefix=save_filename_prefix)
 end
 
@@ -616,13 +636,11 @@ will be used for.
 function buildModel(;
     stream_name::String,
     forecast_locations::String,
-    regressors,
-    lag_intervals::Array{Int64,1},
+    regressors_by_lag_interval::Dict{Int64,Array{Symbol,1}},
     trial_count::Number=1,
     learning_rates::Array{Float64,1}=[0.001],
-    l1_regularizations::Array{Float64,1}=[0.01, 0.05],
+    l1_regularizations::Array{Float64,1}=[0, 0.01, 0.05],
     activations=[gelu],
-    distribution,
     max_epochs=1000,
     batch_size=32,
     save_filename_prefix::String)
@@ -631,25 +649,28 @@ function buildModel(;
 
     results_by_lag::Dict{Int64,Dict{String,Array{Future,1}}} = Dict()
 
-    regressors = sort(regressors)
-    all_regressors = sort(collect(union(map(x -> x[2], regressors)...)))
 
     stats_by_lag = Dict()
 
     stream_start_by_lag = Dict()
 
-    for lag_interval in lag_intervals
+    parameterized_distributions = Dict()
+
+    for (lag_interval, regressors) in regressors_by_lag_interval
 
         stream = loadStream(stream_name=stream_name,
                             zscore_features=true,
                             forecast_locations=forecast_locations,
                             lag_interval=lag_interval)
 
+
+        parameterized_distributions[lag_interval] = parameterizedDistribution(values(stream[1][:Demand_diff]))
+
         stream_start_by_lag[lag_interval] = timestamp(stream[1])[1]
 
         stats_by_lag[lag_interval] = stream[2]
 
-        data_columns = [all_regressors..., :Demand_diff]
+        data_columns = [regressors..., :Demand_diff]
 
         source_data = convert(Array{Float32}, values(stream[1][data_columns...]))
         source_data = shuffleobs(source_data, obsdim=1)
@@ -678,11 +699,12 @@ function buildModel(;
 
                             f = @spawn trainModel(
                                     model_name=model_name,
+                                    regressors=regressors,
                                     model_builder=model_builder,
                                     training_loader=training_loader,
                                     test_loader=test_loader,
                                     activation=activation,
-                                    distribution=distribution,
+                                    distribution=parameterized_distributions[lag_interval],
                                     epochs=max_epochs,
                                     learning_rate=learning_rate,
                                     early_stopping_limit=20,
@@ -720,7 +742,7 @@ function buildModel(;
     for (lag_interval, model_suite) in results_by_lag
         actual_results = []
         for (name, results) in model_suite
-           sorted_results::Array{ModelTrainResult,1} = sort(map(fetch, results), by=x -> x.best_test_loss)
+            sorted_results::Array{ModelTrainResult,1} = sort(map(fetch, results), by=x -> x.best_test_loss)
             average_loss = mean(map(x -> x.best_test_loss, sorted_results))
             average_epoch = mean(map(x -> x.epoch, sorted_results))
 
@@ -738,8 +760,8 @@ function buildModel(;
         println("Saving to: $(full_save_filename)")
         save_data = Dict(:model => actual_results[1][2].model,
                          :lag_interval => lag_interval,
-                         :regressors => all_regressors,
-                         :distribution => distribution,
+                         :regressors => actual_results[1][2].regressors,
+                         :distribution => parameterized_distributions[lag_interval],
                          :stream => stream_name,
                          :forecast_locations => forecast_locations,
                          :stream_start => stream_start_by_lag[lag_interval],
@@ -755,9 +777,6 @@ function buildModel(;
     return best_models_by_lag
 end
 
-
-
-
 struct ModelTrainResult
     name::String
     regressors::Array{Symbol,1}
@@ -766,14 +785,52 @@ struct ModelTrainResult
     epoch::Number
 end
 
+"""
+    trainModel(
+        model_name::String,
+        regressors::Array{Symbol,1},
+        model_builder,
+        training_loader::Flux.Data.DataLoader,
+        test_loader::Flux.Data.DataLoader,
+        epochs::UInt=10,
+        early_stopping_limit::UInt=10,
+        learning_rate=0.001,
+        distribution,
+        l1_regularization,
+        l2_regularization,
+        activation=gelu
+    )
+
+Train a model for a specified number of epochs and stopping early
+if the model's loss on the test set does not improve over a fixed
+number of epochs.
+
+# Arguments
+
+- `model_name`: The name used to identify the model.
+- `regressors`: A list of regressor names used by the model.
+- `model_builder`: A function that builds the model's architecture
+- `training_loader`: A DataLoader that supplies the training data
+- `test_loader`: A DataLoader that supplies the test data
+- `epochs`: The maximum number of epochs to train the model
+- `early_stopping_limit`: If loss does not improve on the test set
+for the number epochs specified, training stops.
+- `learning_rate`: The learning rate to use with the optimizer.
+- `distribution`: The distribution that being fit by the model's
+output.
+- `l1_regularization`: The amount of l1 regularlization to use.
+- `l2_regularization`: The amount of l2 regularlization to use.
+- `activation`: The activation function used by the model.
+
+"""
 function trainModel(;
     model_name,
     regressors::Array{Symbol,1},
     model_builder,
     training_loader::Flux.Data.DataLoader,
     test_loader::Flux.Data.DataLoader,
-    epochs=10,
-    early_stopping_limit=10,
+    epochs::Number=10,
+    early_stopping_limit::Number=10,
     learning_rate=0.001,
     distribution,
     l1_regularization=0.0,
@@ -783,11 +840,11 @@ function trainModel(;
 #    logger = TBLogger("content/$(model_name)", tb_overwrite)
 
     # Determine the number of inputs to the model by looking at the
-    # first training example.
+    # first training example, since there can be a variable number of
+    # regressors used.
     input_count = size(training_loader.data[1][1], 1)
 
-#    println("Input count:\t", input_count)
-
+    # Build the actual model.
     model = model_builder(input_count, activation, l1_regularization, l2_regularization)
 
     LOSS_SMIDGE = Float32(0.0001)
@@ -798,14 +855,15 @@ function trainModel(;
 
         std = softplus.(model_result[2, :]) .+ LOSS_SMIDGE
 
-        likelyhood_loss = -sum(zip(mu, std, y)) do (mu, std, y_target)
+        likelihood_loss = -sum(zip(mu, std, y)) do (mu, std, y_target)
             DistributionsAD.logpdf(distribution(mu, std), y_target) + LOSS_SMIDGE
         end
 
-        return likelyhood_loss + penalty(model)
+        return likelihood_loss + penalty(model)
     end
 
-    # Calculate the loss but more efficiently than example by example.
+    # Calculate the loss but more efficiently than example by example, stack
+    # up the data into a large batch.
     function loss_total(ŷ, y)
         x_batch = reduce(hcat, ŷ)
         y_batch = reduce(hcat, y)
@@ -815,11 +873,11 @@ function trainModel(;
         std = softplus.(model_result[2, :]) .+ LOSS_SMIDGE
 
         reg_loss = penalty(model)
-        likelyhood_loss = -sum(map(x -> DistributionsAD.logpdf(distribution(x[1], x[2]), x[3]) + LOSS_SMIDGE, zip(mu, std, y_batch)))
-        return (likelyhood_loss + reg_loss, reg_loss)
+        likelihood_loss = -sum(map(x -> DistributionsAD.logpdf(distribution(x[1], x[2]), x[3]) + LOSS_SMIDGE, zip(mu, std, y_batch)))
+        return (likelihood_loss + reg_loss, reg_loss)
     end
 
-    # Callback to log information after every epoch
+    # Callback to log information after every epoch to tensorboard.
     function TBCallback(i, training_loss, test_loss, training_loss_reg, test_loss_reg)
         param_dict = Dict{String,Any}()
         fill_param_dict!(param_dict, model, "")
@@ -827,8 +885,6 @@ function trainModel(;
         println("$(model_name) Epoch $(i) test loss: $(test_loss) train $(training_loss)")
         with_logger(logger) do
             @info "model" params = param_dict log_step_increment = 0
-            @info "train" loss = training_loss log_step_increment = 0
-            @info "train_reg" loss = training_loss_reg log_step_increment = 0
             @info "test_reg" loss = test_loss_reg log_step_increment = 0
             @info "test" loss = test_loss
         end
@@ -845,28 +901,32 @@ function trainModel(;
 
     best_model = nothing
     best_epoch = 0
-
     last_epoch = 0
     try
         for i in 1:epochs
             last_epoch = i
+
+            # The data loader won't return the inputs batched together for
+            # efficient compution, take care of this by concatenating the
+            # batches into a matrix rather than an array of arrays.
             x_real = []
             for i in training_loader
                 push!(x_real, (reduce(hcat, i[1]), i[2]))
             end
 
-
             Flux.train!(loss, p, x_real, optimizer)
 
             Flux.testmode!(model)
-            # No need for the training loss to be shown and it saves some calculation time.
-    #        training_loss, training_loss_reg = loss_total(training_loader.data[1], training_loader.data[2])
             test_loss, test_loss_reg = loss_total(test_loader.data[1], test_loader.data[2])
             Flux.trainmode!(model)
 
             println("$(test_loss)\t$(model_name)")
-    #        TBCallback(i, training_loss, test_loss, training_loss_reg, test_loss_reg)
 
+            # If logging to tensorboard use this.
+            # TBCallback(i, training_loss, test_loss, training_loss_reg, test_loss_reg)
+
+            # Implement some early stopping, persist the model with the best
+            # loss on the test set so far.
             if best_test_loss !== missing && best_test_loss < test_loss
                 early_stopping_counter = early_stopping_counter + 1
             else
@@ -879,7 +939,7 @@ function trainModel(;
             end
 
             if early_stopping_counter == early_stopping_limit
-                println("Epoch $(i) Stop-not-improving $(model_name) $(early_stopping_limit) best $(best_test_loss) current: $(test_loss)")
+                println("Epoch $(i) Stoping since loss not improving $(model_name) $(early_stopping_limit) best $(best_test_loss) current: $(test_loss)")
                 break
             end
         end
@@ -887,39 +947,33 @@ function trainModel(;
             println("Reached epoch training limit")
         end
     catch e
-        println(e)
-        # If the model failed to train any more return the model's last
-        # best loss.
-        return ModelTrainResult(model_name, regressors, best_model, best_test_loss, best_epoch)
+        println("Error in training: $(e)")
     end
-
     return ModelTrainResult(model_name, regressors, best_model, best_test_loss, best_epoch)
 end
 
 """
-    parameterizedDistributionForStream(stream_name, lag_interval)
+    parameterizedDistribution(stream_name, lag_interval)
 
-Compare various distributions for goodness of fit for a stream and
-a forecast interval.  Returns the distribution that fits the best.
+Compare various distributions for goodness of fit for an array
+values.  Returns the distribution that fits the best.
 
 """
-function parameterizedDistributionForStream(stream_name, lag_interval)
-    stream = loadStream(stream_name=stream_name, zscore_features=true, forecast_locations="solar", lag_interval=lag_interval, load_live_data=false)
-    dd = values(stream[1][:Demand_diff])
+function parameterizedDistribution(values)
     dist = [DistributionsAD.Normal, DistributionsAD.Cauchy, DistributionsAD.Laplace]
     dist_names = ["Normal", "Cauchy", "Laplace"]
-    bad = filter(x -> isnan(x) || isinf(x), dd)
+    bad = filter(x -> isnan(x) || isinf(x), values)
     ll = []
     for d in dist
         try
-            fitted = fit(d, dd)
-            lv =loglikelihood(fitted, dd)
+            fitted = fit(d, values)
+            lv =loglikelihood(fitted, values)
             push!(ll, lv)
         catch
             push!(ll, NaN)
         end
     end
-#    println("$(stream_name), $(join(round.(ll, digits=2), ", "))")
 
     dist[findmax(ll)[2]]
 end
+

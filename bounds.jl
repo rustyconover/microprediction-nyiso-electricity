@@ -6,7 +6,7 @@ struct Bounds
     lon_min
     lon_max
 
-    function Bounds(points::Array{Tuple{String,Float64,Float64}})
+    function Bounds(points)
         points = reduce(vcat, (map(l -> H3.API.h3ToGeoBoundary(location_to_h3_index(l)), points)))
 
         lats = map(x -> rad_to_deg(x.lat), points)
