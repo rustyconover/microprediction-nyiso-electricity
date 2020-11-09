@@ -303,7 +303,7 @@ function liveSerializedHRRRForDateTime(forecast_date::DateTime, forecast_offset:
     write(grib_out, res.body)
     close(grib_out)
 
-    mv(grib_download_filename, filename)
+    mv(grib_download_filename, filename, force=true)
 
     parseAndSerializeGRIBFile(filename,
         fixed_date,

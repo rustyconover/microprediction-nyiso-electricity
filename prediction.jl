@@ -5,6 +5,10 @@
 
 using Microprediction
 
+cached_forecasts = Dict()
+
+cached_latest_values = Dict()
+
 """
     runSavedModel(
         safe_filename_prefix::String,
@@ -19,9 +23,11 @@ the predicted distribution.
 
 """
 function runSavedModel(;
+    identity_name::String,
     save_filename_prefix::String,
     stream_update_interval::Minute=Dates.Minute(5),
     stream_name::String,
+    run_start_time::DateTime,
     number_of_points::Number=225,
     lag_interval::Number)
 
@@ -31,7 +37,13 @@ function runSavedModel(;
 
     # Get the latest stream values.
     read_config = Microprediction.Config()
-    live_lagged_values = Microprediction.get_lagged(read_config, stream_name)
+
+    if haskey(cached_latest_values, stream_name)
+        live_lagged_values = cached_latest_values[stream_name]
+    else
+        cached_latest_values[stream_name] =
+        live_lagged_values = Microprediction.get_lagged(read_config, stream_name)
+    end
 
     # Since the history doesn't name the value in the TimeArray just
     # deal with this in a hardcoded way.
@@ -40,9 +52,15 @@ function runSavedModel(;
     latest_stream_update_time = timestamp(live_lagged_values)[end]
 
     # Calculate at which the forecast should be produced
-    forecast_target_time = now(UTC) + stream_update_interval * lag_interval
+    forecast_target_time = run_start_time + stream_update_interval * lag_interval
 
-    live_weather = latestHRRRForecastForTime(forecast_target_time, saved_model[:forecast_locations])
+    forecast_cache_key = "$(forecast_target_time)-$(saved_model[:forecast_locations])"
+    if haskey(cached_forecasts, forecast_cache_key)
+        live_weather = cached_forecasts[forecast_cache_key]
+    else
+        cached_forecasts[forecast_cache_key] =
+        live_weather = latestHRRRForecastForTime(forecast_target_time, saved_model[:forecast_locations])
+    end
 
     nyiso_forecast = loadNYISOLoadForecasts()
 
@@ -90,20 +108,26 @@ function runSavedModel(;
 
     model_result = saved_model[:model](vcat(regressor_values...))
 
-    mu = model_result[1]
-    std = softplus(model_result[2])
-
-    distribution = saved_model[:distribution](mu, std)
-
     reverse_z(v, stat) = (v * stat[2]) + stat[1]
 
-    # Now do the trick by iterating across the quantile function
-    # thanks Peter.
-    smidge = 1 / (number_of_points + 2)
-    points = map(x -> reverse_z(quantile(distribution, x), saved_model[:stats][:Demand_diff]) + latest_value, smidge:smidge:1 - (smidge * 2))
+
+    if haskey(saved_model, :points_output) && saved_model[:points_output]
+        points = map(x -> reverse_z(x, saved_model[:stats][:Demand_diff]), model_result) .+ latest_value
+    else
+        mu = model_result[1]
+        std = softplus(model_result[2])
+
+        distribution = saved_model[:distribution](mu, std)
+
+
+        # Now do the trick by iterating across the quantile function
+        # thanks Peter.
+        smidge = 1 / (number_of_points + 2)
+        points = map(x -> reverse_z(quantile(distribution, x), saved_model[:stats][:Demand_diff]) + latest_value, smidge:smidge:1 - (smidge * 2))
+    end
 
     points_stats = mean_and_std(points)
-    @printf "%s lag=%d latest=%f mu=%.2f std=%.2f points mu=%.2f std=%.2f\n" saved_model[:stream] lag_interval latest_value mu std points_stats[1] points_stats[2]
+    @printf "%s %s lag=%d latest=%f mu=%.2f std=%.2f points mu=%.2f std=%.2f\n" identity_name saved_model[:stream] lag_interval latest_value mu std points_stats[1] points_stats[2]
 
     return Dict(
         :stream_name => saved_model[:stream],
@@ -111,30 +135,36 @@ function runSavedModel(;
 end
 
 
+
+
+
 function makeDemandStreams()
     all_demand_streams = [
         "electricity-load-nyiso-north.json",
         "electricity-load-nyiso-overall.json",
-        # "electricity-load-nyiso-centrl.json"
-        # "electricity-load-nyiso-hud_valley.json"
-        # "electricity-load-nyiso-millwd.json"
-        # "electricity-load-nyiso-mhk_valley.json"
-        # "electricity-load-nyiso-nyc.json"
-        # "electricity-load-nyiso-capitl.json"
-        # "electricity-load-nyiso-genese.json"
-        # "electricity-load-nyiso-west.json"
-        # "electricity-load-nyiso-dunwod.json"
-        # "electricity-load-nyiso-longil.json"
+        "electricity-load-nyiso-centrl.json",
+        "electricity-load-nyiso-hud_valley.json",
+        "electricity-load-nyiso-millwd.json",
+        "electricity-load-nyiso-mhk_valley.json",
+        "electricity-load-nyiso-nyc.json",
+        "electricity-load-nyiso-capitl.json",
+        "electricity-load-nyiso-genese.json",
+        "electricity-load-nyiso-west.json",
+        "electricity-load-nyiso-dunwod.json",
+        "electricity-load-nyiso-longil.json",
     ]
 
     for stream_name in all_demand_streams
         build_demand_stream(
             stream_name=stream_name,
-            save_filename_prefix="demand-$(stream_name)",
-            max_epochs=50)
+            use_points=true,
+            save_filename_prefix="demand-points-$(stream_name)",
+            max_epochs=400)
     end
 
 end
+
+
 
 """
     runSavedModels(write_key)
@@ -148,6 +178,14 @@ function runSavedModels(write_key::String="8f0fb3ce57cb67498e3790f9d64dd478")
 #        println("$(now()) Starting prediction run")
 #        println("Doing solar")
 
+        # Set the time for ths model run so the forecasts can
+        # hopefully be cached.
+        run_time = now(UTC)
+        global cached_forecasts = Dict()
+        global cached_latest_values = Dict()
+
+        # Non points stream.
+        write_key =
         all_demand_streams = [
             "electricity-load-nyiso-overall.json",
             "electricity-load-nyiso-north.json",
@@ -165,8 +203,21 @@ function runSavedModels(write_key::String="8f0fb3ce57cb67498e3790f9d64dd478")
 
         for stream_name in all_demand_streams
             submitSavedModelPrediction(
-                write_key=write_key,
+                run_start_time=run_time,
+                identity_name="Flex Hedgehog",
+                write_key="8f0fb3ce57cb67498e3790f9d64dd478", # Flex Hedgehog
                 save_filename_prefix="demand-$(stream_name)",
+                stream_update_interval=Dates.Minute(5),
+                stream_name=stream_name)
+        end
+
+        # Message Moose - points based models.
+        for stream_name in all_demand_streams
+            submitSavedModelPrediction(
+                run_start_time=run_time,
+                identity_name="Message Moose",
+                write_key="7e5d0f66b23def57c5f9bcee73ab45dd", # Message Moose
+                save_filename_prefix="demand-points-$(stream_name)",
                 stream_update_interval=Dates.Minute(5),
                 stream_name=stream_name)
         end
@@ -194,6 +245,8 @@ end
 
 function submitSavedModelPrediction(;
     write_key::String,
+    identity_name::String,
+    run_start_time::DateTime,
     save_filename_prefix::String,
     stream_update_interval::Minute,
     stream_name::String)
@@ -208,8 +261,11 @@ function submitSavedModelPrediction(;
     write_config = Microprediction.Config(write_key)
 
     for (lag_interval, competition_delays) in sort(collect(lag_interval_to_competition))
-        output = runSavedModel(save_filename_prefix=save_filename_prefix,
+        output = runSavedModel(
+            save_filename_prefix=save_filename_prefix,
+            identity_name=identity_name,
                     lag_interval=lag_interval,
+                    run_start_time=run_start_time,
                     stream_update_interval=stream_update_interval,
                     stream_name=stream_name)
 
@@ -218,11 +274,22 @@ function submitSavedModelPrediction(;
             points = round.(points)
         end
 
+        # Should write this to a file.
+        io = open("prediction-log.json", "a")
         for competition_delay in competition_delays
+            println(io,
+            JSON.json(Dict(
+                :stream_name => stream_name,
+                :write_key => write_key,
+                :time => convert(Int64, round(datetime2unix(now(UTC)))),
+                :points => points,
+                :save_filename_prefix => save_filename_prefix,
+                :delay => competition_delay)))
             Microprediction.submit(write_config, output[:stream_name], convert(Array{Float64}, points), competition_delay);
         end
+        close(io)
     end
-    println("$(now()) - Finished prediction run")
+
 end
 
 function cancelPredictions(;

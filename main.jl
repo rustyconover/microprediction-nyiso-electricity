@@ -56,7 +56,10 @@ using CSV
 using TimeZones
 using MLDataUtils
 using BSON
+using Printf
 using JSON
+#using RollingFunctions
+
 
 # Locations that have wind generation.
 wind_generation_sites = [
@@ -280,15 +283,21 @@ imputed <- na_interpolation($stream_values)
 
         # Lag the weather features by the forecast interval as well.
         merged_stream = merge(stream, lag(weather_forecasts, lag_interval))
+    else
+        merged_stream = stream
     end
 
     # Lag the time series by the requested forecast interval and store the column.
     # as demand lag.
-    m3 = rename(lag(merged_stream[:Demand], lag_interval, padding=true), :Demand_lag)
-    merged_stream = merge(merged_stream, m3)
+    if lag_interval > 0
+        m3 = rename(lag(merged_stream[:Demand], lag_interval, padding=true), :Demand_lag)
+        merged_stream = merge(merged_stream, m3)
 
-    m3 = rename(merged_stream[:Demand] .- merged_stream[:Demand_lag], :Demand_diff)
-    merged_stream = merge(merged_stream, m3)
+        m3 = rename(merged_stream[:Demand] .- merged_stream[:Demand_lag], :Demand_diff)
+        merged_stream = merge(merged_stream, m3)
+
+    end
+
 
     # Add the fourier terms with the daily periods and weekly periods based on the stream
     # update interval.  The NYISO streams update every 5 minutes so there are 288 updates
@@ -307,13 +316,17 @@ imputed <- na_interpolation($stream_values)
 
     merged_stream = merge(merged_stream, periodic_values)
 
-    # Remove rows where the HRRR forecast isn't present, because there wouldn't
-    # be enough inputs to the model.
-    merged_stream = merged_stream[findwhen(merged_stream[Symbol("hrrr_temperature_0_$(get_location_name(all_locations[forecast_locations][1]))")] .!== missing)]
+    if skip_weather == false
+        # Remove rows where the HRRR forecast isn't present, because there wouldn't
+        # be enough inputs to the model.
+        merged_stream = merged_stream[findwhen(merged_stream[Symbol("hrrr_temperature_0_$(get_location_name(all_locations[forecast_locations][1]))")] .!== missing)]
+    end
 
-    # Remove rows where the lagged value isn't present, because its a required
-    # input to the model.
-    merged_stream = merged_stream[findwhen(merged_stream[:Demand_lag] .!== NaN)]
+    if lag_interval > 0
+        # Remove rows where the lagged value isn't present, because its a required
+        # input to the model.
+        merged_stream = merged_stream[findwhen(merged_stream[:Demand_lag] .!== NaN)]
+    end
 
     # Before the features will be passed to the MLP neural network potentially they need
     # to be transformed into z-scores so their scale is consistent.
@@ -359,6 +372,59 @@ struct TrialResult
     best_loss::Float64
 end
 
+
+points_model_architectures = [
+    ("64l1-64-32", (input_count, activation, l1_regularization, l2_regularization) ->
+    Chain(
+        RegularizedDense(Dense(input_count, 64, activation), l1_regularization, l2_regularization),
+        RegularizedDense(Dense(64, 64, activation), 0, 0),
+        RegularizedDense(Dense(64, 32, activation), 0, 0),
+        Dense(32, 225)
+    )),
+    # ("64l1-64-d0.1-32", (input_count, activation, l1_regularization, l2_regularization) ->
+    # Chain(
+    #     RegularizedDense(Dense(input_count, 64, activation), l1_regularization, l2_regularization),
+    #     RegularizedDense(Dense(64, 64, activation), 0, 0),
+    #     Dropout(0.1),
+    #     RegularizedDense(Dense(64, 32, activation), 0, 0),
+    #     Dense(32, 225)
+    # )),
+     ("128l1-64-d0.1-128", (input_count, activation, l1_regularization, l2_regularization) ->
+     Chain(
+         RegularizedDense(Dense(input_count, 64, activation), l1_regularization, l2_regularization),
+         RegularizedDense(Dense(64, 64, activation), 0, 0),
+         Dropout(0.1),
+         RegularizedDense(Dense(64, 128, activation), 0, 0),
+         Dense(128, 225)
+    )),
+    # ("128l1-128-128", (input_count, activation, l1_regularization, l2_regularization) ->
+    # Chain(
+    #     RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
+    #     RegularizedDense(Dense(128, 128, activation), 0, 0),
+    #     RegularizedDense(Dense(128, 128, activation), 0, 0),
+    #     Dense(128, 225)
+    # )),
+    # ("128l1-128-128-128", (input_count, activation, l1_regularization, l2_regularization) ->
+    # Chain(
+    #     RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
+    #     RegularizedDense(Dense(128, 128, activation), 0, 0),
+    #     RegularizedDense(Dense(128, 128, activation), 0, 0),
+    #     RegularizedDense(Dense(128, 128, activation), 0, 0),
+    #     Dense(128, 225)
+    # )),
+    ("128l1-128-d0.5-128-d0.1-128", (input_count, activation, l1_regularization, l2_regularization) ->
+    Chain(
+        RegularizedDense(Dense(input_count, 128, activation), l1_regularization, l2_regularization),
+        RegularizedDense(Dense(128, 128, activation), 0, 0),
+        Dropout(0.05),
+        RegularizedDense(Dense(128, 128, activation), 0, 0),
+        Dropout(0.1),
+        RegularizedDense(Dense(128, 128, activation), 0, 0),
+        Dense(128, 225)
+    )),
+
+
+]
 
 # These are neural network architectures that will be tried
 # when building the final models, the model that on average
@@ -470,14 +536,15 @@ function build_wind_power(;
 end
 
 
+
 function build_demand_stream(;
     stream_name::String,
     save_filename_prefix::String,
+    use_points::Bool=false,
     max_epochs::Number=1000,
     trial_count::Number=1)
 
     forecast_locations="city"
-
 
     # Load the stream so that the symbol names of the regressors can be filtered.
     stream = loadStream(stream_name=stream_name,
@@ -526,7 +593,7 @@ function build_demand_stream(;
         filter_regressors = (regressor_full_name) -> true
     end
 
-    filtered_regressors::Dict{Number,Array{Symbol,1}} = Dict()
+    filtered_regressors::Dict{Int64,Array{Symbol,1}} = Dict()
     for (lag_interval, all_feature_names) in feature_selection_preferred
         filtered_regressors[lag_interval] = filter(filter_regressors, all_feature_names)
     end
@@ -534,6 +601,7 @@ function build_demand_stream(;
     println(filtered_regressors)
 
     return buildModel(
+        try_points=use_points,
         stream_name=stream_name,
         forecast_locations=forecast_locations,
         regressors_by_lag_interval=filtered_regressors,
@@ -542,8 +610,6 @@ function build_demand_stream(;
         save_filename_prefix=save_filename_prefix)
 
 end
-
-
 
 
 """
@@ -638,16 +704,17 @@ function buildModel(;
     forecast_locations::String,
     regressors_by_lag_interval::Dict{Int64,Array{Symbol,1}},
     trial_count::Number=1,
-    learning_rates::Array{Float64,1}=[0.001],
-    l1_regularizations::Array{Float64,1}=[0, 0.01, 0.05],
+    learning_rates::Array{Float64,1}=[0.001, 0.0005, 0.0001],
+    l1_regularizations::Array{Float64,1}=[0, 0.01],
     activations=[gelu],
+    try_points::Bool=false,
     max_epochs=1000,
     batch_size=32,
     save_filename_prefix::String)
 
     viewize(x) = map(idx -> view(x, idx,:), 1:size(x,1))
 
-    results_by_lag::Dict{Int64,Dict{String,Array{Future,1}}} = Dict()
+    results_by_lag::Dict{Int64,Dict} = Dict()
 
 
     stats_by_lag = Dict()
@@ -685,7 +752,7 @@ function buildModel(;
 
 
         for learning_rate in learning_rates
-            for (architecture, model_builder) in model_architectures
+            for (architecture, model_builder) in (try_points ? points_model_architectures : model_architectures)
                 for l1_regularization in l1_regularizations
                     for activation in activations
                         model_name = "activation=$(activation)-l1=$(l1_regularization)-arch=$(architecture)-lr=$(learning_rate)"
@@ -697,7 +764,8 @@ function buildModel(;
                             training_loader = Flux.Data.DataLoader(viewize(train_x), train_y, batchsize=batch_size, shuffle=true)
                             test_loader = Flux.Data.DataLoader(viewize(test_x), test_y, batchsize=batch_size, shuffle=true)
 
-                            f = @spawn trainModel(
+                            if try_points == false
+                                f = @spawn trainModel(
                                     model_name=model_name,
                                     regressors=regressors,
                                     model_builder=model_builder,
@@ -710,6 +778,21 @@ function buildModel(;
                                     early_stopping_limit=20,
                                     l1_regularization=l1_regularization,
                                     l2_regularization=0.0)
+                            else
+                                f = @spawn trainModel2(
+                                    model_name=model_name,
+                                    regressors=regressors,
+                                    model_builder=model_builder,
+                                    training_loader=training_loader,
+                                    test_loader=test_loader,
+                                    activation=activation,
+                                    distribution=parameterized_distributions[lag_interval],
+                                    epochs=max_epochs,
+                                    learning_rate=learning_rate,
+                                    early_stopping_limit=20,
+                                    l1_regularization=l1_regularization,
+                                    l2_regularization=0.0)
+                            end
 
                             if !haskey(results_by_lag, lag_interval)
                                 results_by_lag[lag_interval] = Dict()
@@ -741,26 +824,33 @@ function buildModel(;
     # Determine the best model for each lag interval.
     for (lag_interval, model_suite) in results_by_lag
         actual_results = []
+
+
         for (name, results) in model_suite
             sorted_results::Array{ModelTrainResult,1} = sort(map(fetch, results), by=x -> x.best_test_loss)
             average_loss = mean(map(x -> x.best_test_loss, sorted_results))
             average_epoch = mean(map(x -> x.epoch, sorted_results))
 
+
             push!(actual_results, (average_loss, sorted_results[1], average_epoch))
         end
 
+        training_losses = []
         actual_results = sort(actual_results, by=x -> x[1])
         push!(report, "Lag Interval: $(lag_interval)")
         for (average_loss, best_model, average_epoch) in actual_results
             push!(report, "$(average_loss)\t$(best_model.name)\t$(average_epoch)")
+            push!(training_losses, (best_model.name, best_model.losses_by_epoch))
         end
 
         model = actual_results[1][2].model
         full_save_filename = "$(save_filename_prefix)-lag-$(lag_interval).binary"
         println("Saving to: $(full_save_filename)")
         save_data = Dict(:model => actual_results[1][2].model,
+                         :training_losses => training_losses,
                          :lag_interval => lag_interval,
                          :regressors => actual_results[1][2].regressors,
+                         :points_output => try_points,
                          :distribution => parameterized_distributions[lag_interval],
                          :stream => stream_name,
                          :forecast_locations => forecast_locations,
@@ -783,6 +873,7 @@ struct ModelTrainResult
     model::Union{Chain,Nothing}
     best_test_loss::Union{Missing,Float32}
     epoch::Number
+    losses_by_epoch::Array{Float64,1}
 end
 
 """
@@ -893,6 +984,7 @@ function trainModel(;
     optimizer = ADAM(learning_rate)
     p = Flux.params(model)
 
+    tracked_losses = []
     # Track that loss is decreasing otherwise stop early.
     early_stopping_counter = 0
     best_test_loss::Union{Missing,Float64} = missing
@@ -920,6 +1012,7 @@ function trainModel(;
             test_loss, test_loss_reg = loss_total(test_loader.data[1], test_loader.data[2])
             Flux.trainmode!(model)
 
+            push!(tracked_losses, test_loss)
             println("$(test_loss)\t$(model_name)")
 
             # If logging to tensorboard use this.
@@ -949,8 +1042,142 @@ function trainModel(;
     catch e
         println("Error in training: $(e)")
     end
-    return ModelTrainResult(model_name, regressors, best_model, best_test_loss, best_epoch)
+    return ModelTrainResult(model_name, regressors, best_model, best_test_loss, best_epoch, tracked_losses)
 end
+
+
+
+
+
+
+function trainModel2(;
+    model_name,
+    regressors::Array{Symbol,1},
+    model_builder,
+    training_loader::Flux.Data.DataLoader,
+    test_loader::Flux.Data.DataLoader,
+    epochs::Number=10,
+    early_stopping_limit::Number=25,
+    learning_rate=0.001,
+    distribution,
+    l1_regularization=0.0,
+    l2_regularization=0.0,
+    activation=gelu)::ModelTrainResult
+
+#    logger = TBLogger("content/$(model_name)", tb_overwrite)
+
+    # Determine the number of inputs to the model by looking at the
+    # first training example, since there can be a variable number of
+    # regressors used.
+    input_count = size(training_loader.data[1][1], 1)
+
+    # Build the actual model.
+    model = model_builder(input_count, activation, l1_regularization, l2_regularization)
+
+    function loss(ŷ, y)::Float32
+        model_result = model(ŷ)
+        return sum(map(index -> minimum((view(model_result, :, index) .- y[index]) .^ 2), 1:size(model_result,2)))
+    end
+
+    # Calculate the loss but more efficiently than example by example, stack
+    # up the data into a large batch.
+    function loss_total(ŷ, y)::Tuple{Float32, Float32}
+        x_batch = reduce(hcat, ŷ)
+        y_batch = reduce(hcat, y)
+
+        model_result = model(x_batch)
+        points_loss = sum(map(index -> minimum((view(model_result, :, index) .- y_batch[index]) .^ 2), 1:size(model_result,2)))
+        reg_loss = penalty(model)
+
+        return (points_loss + reg_loss, reg_loss)
+    end
+
+
+    optimizer = ADAM(learning_rate)
+    p = Flux.params(model)
+
+
+    tracked_losses = []
+
+    # Track that loss is decreasing otherwise stop early.
+    early_stopping_counter = 0
+    best_test_loss::Union{Missing,Float64} = missing
+
+    early_stopping_average_count = 25
+
+    best_model = nothing
+    best_epoch = 0
+    last_epoch = 0
+
+    last_losses = []
+
+#    try
+        for i in 1:epochs
+            last_epoch = i
+
+            # The data loader won't return the inputs batched together for
+            # efficient compution, take care of this by concatenating the
+            # batches into a matrix rather than an array of arrays.
+            x_real = []
+            for i in training_loader
+                push!(x_real, (reduce(hcat, i[1]), i[2]))
+            end
+
+            Flux.train!(loss, p, x_real, optimizer)
+
+            Flux.testmode!(model)
+            test_loss, test_loss_reg = loss_total(test_loader.data[1], test_loader.data[2])
+            Flux.trainmode!(model)
+
+            push!(tracked_losses, test_loss)
+            push!(last_losses, test_loss)
+
+            if length(last_losses) > early_stopping_average_count
+                popat!(last_losses, 1)
+            end
+
+            average_loss = mean(last_losses)
+
+            if last_epoch % 100 == 0
+                foo = @sprintf "%80s\t%10d\t%.3f\t%.3f\n" model_name last_epoch test_loss average_loss
+                println(foo)
+            end
+
+            # If logging to tensorboard use this.
+
+            # Implement some early stopping, persist the model with the best
+            # loss on the test set so far.
+            if best_test_loss !== missing && best_test_loss < average_loss
+                early_stopping_counter = early_stopping_counter + 1
+            else
+                if best_test_loss === missing || best_test_loss > test_loss
+                    best_test_loss = average_loss
+                    best_epoch = last_epoch
+                    best_model = deepcopy(model)
+                    early_stopping_counter = 0
+                end
+            end
+
+            if early_stopping_counter == early_stopping_limit
+                println("Epoch $(i) Stopping since loss not improving $(model_name) $(early_stopping_limit) best $(best_test_loss) current: $(test_loss)")
+                break
+            end
+        end
+        if last_epoch == epochs
+            println("Reached epoch training limit")
+        end
+#    catch e
+#        println("Error in training: $(e)")
+#    end
+    return ModelTrainResult(model_name, regressors, best_model, best_test_loss, best_epoch, tracked_losses)
+end
+
+
+
+
+
+
+
 
 """
     parameterizedDistribution(stream_name, lag_interval)

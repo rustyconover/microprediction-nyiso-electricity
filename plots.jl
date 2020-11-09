@@ -237,3 +237,171 @@ function plot_quartiles_for_stream_diff(stream_name, lag_interval)
     qqplot!(fd[3], dd, label="Laplace", markersize=1, markerstrokewidth=0, legend=true)
 end
 
+
+function plot_training_history(save_filename)
+    data = deserialize(save_filename)[:training_losses]
+
+    all_values = reduce(vcat, map(x -> x[2], data))
+
+    y_lim = (minimum(all_values) * 0.8, 100)
+
+    plotlyjs()
+    plots = []
+    p = plot(title="Smoothed over 10 intervals")
+    for (name, data) in data
+        plot!(p, rollmean(data, 10), width=2, alpha=0.5, label="smooth -$(name)", ylims=y_lim, legendfontsize=6)
+#        plot!(p, data, width=1, label=name)
+    end
+    push!(plots, p)
+
+    p = plot(title="Raw")
+    for (name, data) in data
+        plot!(p, data, width=2, alpha=0.5, label="$(name)", ylims=y_lim, legendfontsize=6)
+    end
+    push!(plots, p)
+
+    return plot(plots..., layout=(2, 1), size=(1000, 1000))
+end
+
+
+function plot_prediction_history()
+
+    predictions_by_stream = Dict()
+    for line in eachline("prediction-log.json")
+        l = JSON.parse(line)
+        dt = unix2datetime(l["time"]);
+        points = l["points"]
+        delay = l["delay"]
+
+        if delay == 70
+            continue
+        end
+
+        stream_name = l["stream_name"]
+        println(dt)
+
+        if !haskey(predictions_by_stream, stream_name)
+            predictions_by_stream[stream_name] = []
+        end
+
+        push!(predictions_by_stream[stream_name], Dict(
+            :points => points,
+            :delay => delay,
+            :dt => dt
+        ))
+    end
+
+    streams = sort([
+        "electricity-load-nyiso-north.json"
+        "electricity-load-nyiso-centrl.json"
+        "electricity-load-nyiso-hud_valley.json"
+        "electricity-load-nyiso-overall.json"
+        "electricity-load-nyiso-millwd.json"
+        "electricity-load-nyiso-mhk_valley.json"
+        "electricity-load-nyiso-nyc.json"
+        "electricity-load-nyiso-capitl.json"
+        "electricity-load-nyiso-genese.json"
+        "electricity-load-nyiso-west.json"
+        "electricity-load-nyiso-dunwod.json"
+        "electricity-load-nyiso-longil.json"])
+
+
+    loaded_streams = Dict()
+    predictions_by_stream_by_delay = Dict()
+
+    delay_keys = Set()
+
+    bounds_by_stream = Dict()
+    y_max = Dict()
+
+    combined_streams = []
+    for stream_name in streams
+        stream = loaded_streams[stream_name] = loadStream(stream_name=stream_name,
+            zscore_features=false,
+            load_live_data=true,
+            skip_weather=true,
+            lag_interval=0)
+
+        recent = from(stream[1], now(UTC) - Dates.Day(2))
+        min_x = nothing
+        max_x = nothing
+
+        predictions_by_stream_by_delay[stream_name] = Dict()
+
+        for row in predictions_by_stream[stream_name]
+            if !haskey(predictions_by_stream_by_delay[stream_name], row[:delay])
+                predictions_by_stream_by_delay[stream_name][row[:delay]] = []
+            end
+            push!(delay_keys, row[:delay])
+
+            k = kde(convert(Array{Float32,1}, row[:points]))
+            if !haskey(y_max, stream_name)
+                y_max[stream_name] = Dict()
+            end
+
+            if !haskey(y_max[stream_name], row[:delay]) || y_max[stream_name][row[:delay]] < maximum(k.density)
+                y_max[stream_name][row[:delay]] = maximum(k.density)
+            end
+
+            if min_x === nothing || min_x > minimum(k.x)
+                min_x = minimum(k.x)
+            end
+
+            if max_x === nothing || max_x < maximum(k.x)
+                max_x = maximum(k.x)
+            end
+
+            push!(predictions_by_stream_by_delay[stream_name][row[:delay]], row)
+        end
+
+        bounds_by_stream[stream_name] = (min_x, max_x)
+
+        paired_predictions = collect(zip(map(x -> predictions_by_stream_by_delay[stream_name][x], sort(collect(delay_keys)))...))
+
+        push!(combined_streams, paired_predictions)
+    end
+
+    delay_keys = sort(collect(delay_keys))
+    println(delay_keys)
+
+
+    theme(:dark)
+
+    @gif for time_index in 1:length(combined_streams[1])
+        big_plots = []
+        for (stream_index, stream_name) in enumerate(streams)
+            stream_plots = []
+            for (delay_index, delay) in enumerate(delay_keys)
+                println("stream $(stream_index) delay $(delay_index) time: $(time_index)")
+#                println(size(combined_streams[stream_index][delay_index]))
+                row = combined_streams[stream_index][time_index][delay_index]
+                expected_value = values(from(loaded_streams[stream_name][1], row[:dt] + Dates.Second(delay))[:Demand])
+                k = kde(convert(Array{Float32,1}, row[:points]))
+
+                short_stream = replace(replace(stream_name, "electricity-load-nyiso-" => ""), ".json" => "")
+                p1 = plot(k,
+                    xlims=bounds_by_stream[stream_name],
+                    ylims=(0, y_max[stream_name][delay]),
+                    title="$(short_stream) $(round(row[:dt], Dates.Minute)) - $(delay) second forecast",
+                    fillrange=0,
+                    color=:lightgray, # palette(:Paired_12)[stream_index],
+                    fillcolor=palette(:Paired_12)[stream_index],
+                    titlefont=(13, "monaco"),
+                    fillalpha=0.75,
+                    legend=false,
+                    label="Predicted Density")
+
+                if length(expected_value) > 0
+                    vline!(p1, [expected_value[1]], width=2, label="Actual Value", color=:white)
+                end
+
+                push!(stream_plots, p1)
+            end
+            stream_plot = plot(stream_plots..., layout=(length(delay_keys), 1))
+            push!(big_plots, stream_plot)
+        end
+        plot(big_plots..., layout=(3, 4), size=(2502, 1802))
+    end
+
+#    return predictions_by_stream
+end
