@@ -31,7 +31,6 @@ available_regressor_names = Dict(
     :nyiso_forecast_millwd => [Symbol("nyiso-millwd")],
 
     # Weather regressors.
-    :heat_index => cols_starting("heat_index"),
     :relative_humidity => cols_containing("relative_humidity"),
     :surface_pressure => cols_containing("surface_pressure"),
     :temperature => cols_starting("hrrr_temperature"),
@@ -97,6 +96,52 @@ function feature_selection_demand(;
         end
     end
 end
+
+
+function feature_selection_lbmp(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    electricity_load_streams = collect(filter(x -> startswith(x, "electricity-lbmp"), keys(Microprediction.get_sponsors(Microprediction.Config()))))
+
+    for stream_name in electricity_load_streams
+        for lag_interval in [1,3,12]
+
+            # FIXME: should only include the cities that are in
+            # the particular NYISO zone, otherwise there is a lot
+            # of noise.
+
+            nyiso_feature_name = replace(replace(stream_name, "electricity-lbmp-nyiso-" => "nyiso_forecast_"), ".json" => "")
+            nyiso_feature_name = replace(nyiso_feature_name, "npx" => "nyc")
+            feature_selection(
+                stream_name=stream_name,
+                always_regressors=[
+                    :last_demand,
+                    :temperature,
+                    Symbol(nyiso_feature_name),
+                    ],
+                never_regressors=convert(Array{Symbol,1}, [
+                    :downward_short_wave_radiation,
+                    :total_cloud_cover,
+                    :low_cloud_cover,
+                    :high_cloud_cover,
+                    :medium_cloud_cover,
+                    :visible_diffuse_downward_solar_flux,
+                    :visible_beam_downward_solar_flux,
+                ]),
+                forecast_locations="city",
+                combination_lengths=0:2,
+                filter_locations=contains(stream_name, "overall") ? false : true,
+                include_nyiso=false,
+                lag_interval=lag_interval,
+                trial_count=trial_count,
+                epochs=epochs,
+            )
+        end
+    end
+end
+
 
 
 """
@@ -188,6 +233,40 @@ function feature_selection_wind_power(;
     end
 end
 
+
+function feature_selection_other_generation(;
+    epochs::Number=100,
+    trial_count::Number=1,
+    learning_rate::Float64=0.001)
+
+    generation_streams = filter(x -> startswith(x, "electricity-fueltype") && !contains(x, "wind") && !contains(x, "other_renewables"), keys(Microprediction.get_sponsors(Microprediction.Config())))
+
+    generation_streams = collect(generation_streams)
+    map(generation_streams[1:1]) do stream_name
+        println("Doing $(stream_name)")
+        for lag_interval in [1,3,12]
+            feature_selection(
+                stream_name=stream_name,
+                always_regressors=[:last_demand],
+                never_regressors=[
+                    :downward_short_wave_radiation,
+                    :low_cloud_cover,
+                    :high_cloud_cover,
+                    :medium_cloud_cover,
+                    :visible_diffuse_downward_solar_flux,
+                    :visible_beam_downward_solar_flux,
+                ],
+                forecast_locations="city",
+                combination_lengths=0:2,
+                include_nyiso=false,
+                lag_interval=lag_interval,
+                trial_count=trial_count,
+                epochs=epochs,
+            )
+        end
+    end
+end
+
 """
     feature_selection_generation(epochs, trial_count, learning_rate)
 
@@ -246,6 +325,8 @@ function regressor_names_to_columns(regressors, data)
 
     return map(handle_regressors, regressors)
 end
+
+@enum NyisoForecastInclusion NyisoAll NyisoOverall NyisoNone
 
 """
     feature_selection(
@@ -450,13 +531,13 @@ function compareFeaturePerformance(;
 
             println(model_name)
 
-            trials = []
-            for index in 1:trial_count
-                f = @spawn trainModel(
+            trials = map(1:trial_count) do index
+                @spawn trainModel(
                         model_name=model_name,
                         regressors=idea,
                         model_builder=model_builder,
                         training_loader=training_loader,
+                        model_approach=ParameterizedDistributionDiff,
                         test_loader=test_loader,
                         activation=activation,
                         epochs=epochs,
@@ -465,7 +546,6 @@ function compareFeaturePerformance(;
                         early_stopping_limit=early_stopping_limit,
                         l1_regularization=0.05,
                         l2_regularization=0.0)
-                push!(trials, f)
             end
 
             push!(config_trials, trials)

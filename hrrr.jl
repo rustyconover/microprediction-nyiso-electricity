@@ -58,10 +58,11 @@ function retrieveHRRRForecast(forecast_date::DateTime,
               false)
 end
 
+
+grib_lock = ReentrantLock()
+
 function parseAndSerializeGRIBFile(filename, fixed_date, zero_padded_forecast_hour, zero_padded_forecast_offset, is_live)
-
-
-
+    lock(grib_lock) do
 
     for (suffix, locations) in all_locations
         serialized_filename = joinpath(is_live ? LIVE_FORECAST_DIRECTORY : FORECAST_DIRECTORY,
@@ -116,6 +117,8 @@ function parseAndSerializeGRIBFile(filename, fixed_date, zero_padded_forecast_ho
 
         serialize(serialized_filename, forecasts);
     end
+
+    end
 end
 
 
@@ -164,7 +167,7 @@ function serializedHRRRForecastForTime(target::DateTime, forecast_locations::Str
         if fn !== nothing
             return deserialize(fn(forecast_locations))
         end
-        # Move to the previou hour's forecast run
+        # Move to the previous hour's forecast run
         current = current - Dates.Hour(1)
         # Increase the forecast offset by 1 so we're referencing the same
         # effective time.
@@ -183,13 +186,17 @@ Return the the latest HRRR forecast for the specified time but perform interpola
 over the specified interpolation range of minutes.
 
 """
+
 function latestHRRRForecastForTime(target::DateTime,
     forecast_locations::String;
     interpolation_range=0:1:60)
+
+
+
     start_time = trunc(target, Dates.Hour)
     end_time = start_time + Dates.Hour(1)
-    first_values = @spawn serializedHRRRForecastForTime(start_time, forecast_locations)
-    second_values = @spawn serializedHRRRForecastForTime(end_time, forecast_locations)
+    first_values = serializedHRRRForecastForTime(start_time, forecast_locations)
+    second_values = serializedHRRRForecastForTime(end_time, forecast_locations)
 
     first_values = fetch(first_values)
     second_values = fetch(second_values)
@@ -205,9 +212,9 @@ function latestHRRRForecastForTime(target::DateTime,
 
     location_names = get_location_name.(all_locations[forecast_locations])
 
-    R"""
-library(weathermetrics)
-"""
+#    R"""
+# library(weathermetrics)
+# """
 
     for product in [forecast_products...,
         Dict("name" => "Average Wind Speed", "level" => 10),
@@ -245,23 +252,24 @@ library(weathermetrics)
     end
 
     # Calculate the heat index from the temperature and relative humidity.
-    for name in location_names
-        temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
-        humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
+    # for name in location_names
+    #     temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
+    #     humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
 
-        R"""
-    heat_index_result <- heat.index($temp, rh=$humidity)
-    """
-        @rget heat_index_result
+    #     R"""
+    # heat_index_result <- heat.index($temp, rh=$humidity)
+    # """
+    #     @rget heat_index_result
 
-        field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
-    end
+    #     field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
+    # end
 
     return TimeArray(namedtuple(field_values), timestamp=:datetime)
 end
 
 cached_hrrr_404 = Dict()
 
+live_hrrr_lock = ReentrantLock()
 """
     liveHRRRFilenameForDateTime(forecast_date, forecast_offset)
 
@@ -288,6 +296,8 @@ function liveSerializedHRRRForDateTime(forecast_date::DateTime, forecast_offset:
         return nothing
     end
 
+    lock(live_hrrr_lock) do
+
     res = HTTP.request(:GET, full_url; pipeline_limit=1, connection_limit=4, verbose=1, status_exception=false, readtimeout=3, retry=true)
     if res.status != 200
         # Cache the missing file for 10 minutes.
@@ -313,6 +323,7 @@ function liveSerializedHRRRForDateTime(forecast_date::DateTime, forecast_offset:
 
     # Now return the
     return suffix -> joinpath(LIVE_FORECAST_DIRECTORY, "$(fixed_date)-$(zero_padded_forecast_hour)-$(zero_padded_forecast_offset).forecast.$(suffix).data")
+end
 end
 
 """
@@ -358,9 +369,9 @@ function loadHRRRForecasts(forecast_locations)
 
     serialized_files = filter(m -> match(Regex("-00.forecast.$(forecast_locations).data\$"), m) !== nothing, readdir(FORECAST_DIRECTORY))
 
-    R"""
-library(weathermetrics)
-"""
+#     R"""
+# library(weathermetrics)
+# """
     product_names = []
     did_names = false
 
@@ -450,17 +461,18 @@ library(weathermetrics)
 
 
     # Calculate the heat index from the temperature and relative humidity.
-    for name in location_names
-        temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
-        humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
 
-        R"""
-    heat_index_result <- heat.index($temp, rh=$humidity)
-    """
-        @rget heat_index_result
+    # for name in location_names
+    #     temp = field_values[Symbol("hrrr_temperature_0_$(name)")] = kelvin_to_f.(field_values[Symbol("hrrr_temperature_0_$(name)")])
+    #     humidity = field_values[Symbol("hrrr_relative_humidity_0_$(name)")]
 
-        field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
-    end
+    #     R"""
+    # heat_index_result <- heat.index($temp, rh=$humidity)
+    # """
+    #     @rget heat_index_result
+
+    #     field_values[Symbol("hrrr_heat_index_0_$(name)")] = heat_index_result
+    # end
 
     return TimeArray(namedtuple(field_values), timestamp=:datetime)
 end

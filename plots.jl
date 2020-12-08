@@ -237,39 +237,212 @@ function plot_quartiles_for_stream_diff(stream_name, lag_interval)
     qqplot!(fd[3], dd, label="Laplace", markersize=1, markerstrokewidth=0, legend=true)
 end
 
+function analyze_model_architectures_for_demand()
+    files = filter(m -> match(r"^demand-quantile8", m) != nothing, readdir())
 
-function plot_training_history(save_filename)
-    data = deserialize(save_filename)[:training_losses]
+    used_models = []
+    for filename in files
+        data = deserialize(filename)
 
-    all_values = reduce(vcat, map(x -> x[2], data))
-
-    y_lim = (minimum(all_values) * 0.8, 100)
-
-    plotlyjs()
-    plots = []
-    p = plot(title="Smoothed over 10 intervals")
-    for (name, data) in data
-        plot!(p, rollmean(data, 10), width=2, alpha=0.5, label="smooth -$(name)", ylims=y_lim, legendfontsize=6)
-#        plot!(p, data, width=1, label=name)
+        push!(used_models, data[:model_name])
     end
-    push!(plots, p)
 
-    p = plot(title="Raw")
-    for (name, data) in data
-        plot!(p, data, width=2, alpha=0.5, label="$(name)", ylims=y_lim, legendfontsize=6)
-    end
-    push!(plots, p)
-
-    return plot(plots..., layout=(2, 1), size=(1000, 1000))
+    collect(countmap(used_models))
 end
 
+
+
+@enum AnalysisGraphType Area VLines CDF
+
+function analyze_model(
+    graph_type::AnalysisGraphType=Area
+)
+    n = now(UTC)
+
+    stream_name = "electricity-load-nyiso-overall.json"
+
+    # Get the latest stream values.
+    read_config = Microprediction.Config()
+    live_lagged_values = Microprediction.get_lagged(read_config, stream_name)
+
+
+    cached_nyiso_forecast = loadNYISOLoadForecasts()
+
+    @gif for time_offset in (60 * 24 * 1.5):-5:60
+        t = n - Dates.Minute(time_offset)
+
+        all_results = map([CRPSRegression, ParameterizedDistributionDiff, QuantileRegression]) do model_approach
+            results = runSavedModel(
+                save_filename_prefix="test-1-$(model_approach)-electricity-load-nyiso-overall.json",
+                stream_name=stream_name,
+                lag_interval=12,
+                identity_name="foo",
+                all_candidates=false,
+                run_start_time=t)
+            (model_approach, results)
+        end
+
+        plots = []
+        actual = values(from(live_lagged_values, t + Dates.Second(3555)))
+        actual_nyiso = values(from(cached_nyiso_forecast[Symbol("nyiso-overall")], t + Dates.Second(3555)))
+
+
+        if graph_type === CDF
+            p = plot(
+                title="NYISO Overall Electricity Demand 1-Hour Ahead CDFs @ $(t)",
+                titlefontsize=14,
+                legend=:topleft,
+                xlims=(14000, 21000),
+                size=(900, 600)
+            )
+            for (index, (approach, result)) in enumerate(all_results)
+                plot!(p, vec(result[:points]), fixed_quantiles,
+                fillcolor=palette(:Paired_12)[(index * 2 % 12) + 1],
+                color=palette(:Paired_12)[(index * 2 % 12) + 1],
+                label="$(approach) $(result[:name])")
+            end
+            p
+        else
+            p = plot(
+                title="NYISO Overall Electricity Demand 1-Hour Ahead CDFs @ $(t)",
+#                titlefontsize=10,
+                legend=:topleft,
+                xlims=(12000, 21000),
+                size=(900, 900)
+            )
+
+            for (index, (approach, result)) in enumerate(all_results)
+                if graph_type === VLines
+                    p = # plot(
+                vline(vec(result[:points]),
+                fillcolor=palette(:Paired_12)[(index * 2 % 12) + 1],
+                color=palette(:Paired_12)[(index * 2 % 12) + 1],
+                fillalpha=0.25,
+                fillrange=0,
+                ylims=(0, 0.004),
+                xlims=(12000, 21000),
+                xlabel="Megawatts",
+                legend=:outertopright,
+                title="NYISO Overall Electricity Demand 1-Hour Ahead @ $(t)",
+#                titlefontsize=10,
+                label="$(approach) $(result[:name])")
+                elseif graph_type === Area
+
+
+                    plot!(p,
+                    kde(vec(result[:points])),
+                    # fillcolor=palette(:Paired_12)[(index * 2 % 12) + 1],
+                    # color=palette(:Paired_12)[(index * 2 % 12) + 1],
+                    fillalpha=0.5,
+                    fillrange=0,
+                    width=2,
+                    xlabel="Megawatts",
+                    ylims=(0, 0.006),
+                    xlims=(13000, 22000),
+                    legend=:topright,
+                    title="NYISO Overall Electricity Demand 1-Hour Ahead @ $(t)",
+                    legendfontsize=12,
+                   # titlefontsize=10,
+                    label="$(approach)")
+                end
+
+            end
+
+            # Now I'd like to get the true value.
+            if (length(actual) > 0)
+                vline!(p, [actual[1]],
+            color="red",
+            width=3,
+            label="Actual Value")
+            end
+
+
+            # if (length(actual_nyiso) > 0)
+            #     vline!(p, [actual_nyiso[1]],
+            #         color="white",
+            #         width=3,
+            #         label="NYISO Public Hourly Forecast")
+            # end
+
+            push!(plots, p)
+
+            plot(plots..., layout=(length(plots), 1),
+            dpi=150,
+             size=(900, 600))
+        end
+    end
+end
+
+function plot_training_history(filenames...)
+
+    data = []
+    for save_filename in filenames
+        data = vcat(data, deserialize(save_filename)[:training_losses])
+    end
+
+#    test_loss_all_values = map(x -> x[:test_loss], reduce(vcat, map(x -> x[:loss_history], data)))
+#    overall_loss_all_values = map(x -> x[:overall_loss], reduce(vcat, map(x -> x[:loss_history], data)))
+
+#    y_lim = (minimum(test_loss_all_values) * 0.8, 100)
+
+#    plotlyjs()
+#    gr()
+
+    plots = []
+
+    # Compare all of the results.
+
+    target_symbol = :test_total
+
+    data = sort(data, by=x -> minimum(map(y -> y[target_symbol], x[:loss_history])))
+
+    for row in data
+        println("$(row[:name]) - $(minimum(map(y -> y[target_symbol], row[:loss_history])))")
+    end
+
+    is_first = true
+    for symbol_name in [target_symbol]
+        p = plot(title="$(symbol_name) from Target")
+        for record in data
+            v = map(x -> x[symbol_name], record[:loss_history])[30:end]
+            plot!(p,
+                rollmean(v, 10),
+                label="$(record[:name])",
+                legend=:outertopright,
+                legendfontsize=6)
+        end
+        push!(plots, p)
+    end
+    final = plot(plots..., layout=(length(plots), 1), size=(1000, 1000))
+    gr()
+    return final
+end
+
+
+function plot_demands()
+
+    stream_names = filter(x -> startswith(x, "electricity-load"), keys(Microprediction.get_sponsors(Microprediction.Config())))
+    plots = []
+    for stream_name in stream_names
+        stream = loadStream(stream_name=stream_name, zscore_features=false, forecast_locations="solar", skip_weather=true, lag_interval=1, load_live_data=false)
+        push!(plots, plot(stream[1][:Demand], title=stream_name, legend=false))
+        push!(plots, histogram(diff(stream[1][:Demand], 1), title="Diff 1", bins=100))
+        push!(plots, histogram(diff(stream[1][:Demand], 3), title="Diff 3", bins=100))
+        push!(plots, histogram(diff(stream[1][:Demand], 12), title="Diff 12", bins=100))
+    end
+    return plot(plots..., layout=(length(stream_names), 4), size=(2000, 200 * length(stream_names)))
+end
 
 function plot_prediction_history()
 
     predictions_by_stream = Dict()
     for line in eachline("prediction-log.json")
         l = JSON.parse(line)
-        dt = unix2datetime(l["time"]);
+
+        if !haskey(l, "prediction_run_time")
+            continue
+        end
+        dt = DateTime(ZonedDateTime(DateTime(l["prediction_run_time"]), tz"UTC"))
         points = l["points"]
         delay = l["delay"]
 
@@ -277,14 +450,36 @@ function plot_prediction_history()
             continue
         end
 
+        if !haskey(l, "write_key")
+            write_key = "8f0fb3ce57cb67498e3790f9d64dd478"
+        else
+            write_key = l["write_key"]
+        end
+
+        points_directly_learned = false
+        if write_key == "7e5d0f66b23def57c5f9bcee73ab45dd"
+            points_directly_learned = true
+        end
+
+
+        if write_key != "8a8fb150f0dadaf66b918602620c30ec"
+            continue
+        end
+
         stream_name = l["stream_name"]
-        println(dt)
+
+
+
+        if !(dt >= now(UTC) - Dates.Hour(7))
+            continue
+        end
 
         if !haskey(predictions_by_stream, stream_name)
             predictions_by_stream[stream_name] = []
         end
 
         push!(predictions_by_stream[stream_name], Dict(
+            :identity => points_directly_learned ? "direct-points" : "parameterized-distribution",
             :points => points,
             :delay => delay,
             :dt => dt
@@ -358,12 +553,14 @@ function plot_prediction_history()
 
         paired_predictions = collect(zip(map(x -> predictions_by_stream_by_delay[stream_name][x], sort(collect(delay_keys)))...))
 
+
+        println(length(paired_predictions))
+
         push!(combined_streams, paired_predictions)
     end
 
     delay_keys = sort(collect(delay_keys))
     println(delay_keys)
-
 
     theme(:dark)
 
@@ -379,12 +576,14 @@ function plot_prediction_history()
                 k = kde(convert(Array{Float32,1}, row[:points]))
 
                 short_stream = replace(replace(stream_name, "electricity-load-nyiso-" => ""), ".json" => "")
-                p1 = plot(k,
+#                p1 = plot(k,
+                p1 = vline(row[:points],
                     xlims=bounds_by_stream[stream_name],
                     ylims=(0, y_max[stream_name][delay]),
                     title="$(short_stream) $(round(row[:dt], Dates.Minute)) - $(delay) second forecast",
                     fillrange=0,
-                    color=:lightgray, # palette(:Paired_12)[stream_index],
+                    color=palette(:Paired_12)[stream_index],
+                    # color=:lightgray, # palette(:Paired_12)[stream_index],
                     fillcolor=palette(:Paired_12)[stream_index],
                     titlefont=(13, "monaco"),
                     fillalpha=0.75,
