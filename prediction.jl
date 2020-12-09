@@ -136,7 +136,6 @@ function runSavedModel(;
 
     if all_candidates === true
         models = map(x -> (x[:training_result].model, x[:training_result].name), saved_model[:all_results])
-#        models = filter(x -> x[2] !== "lag=12-batch=512-o=ADAMW-arch=12-sep-softplus-lr=0.001-t=1", models)
     else
         models = [(saved_model[:model], saved_model[:model_name])]
     end

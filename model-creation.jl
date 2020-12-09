@@ -180,7 +180,7 @@ function makeDemandStreams()
             @async build_demand_stream(
             stream_name=stream_name,
             model_approach=model_approach,
-            save_filename_prefix="test-1-$(model_approach)-$(stream_name)",
+            save_filename_prefix="test-2-$(model_approach)-$(stream_name)",
             batch_sizes=[512],
             trial_count=1,
             max_epochs=100)

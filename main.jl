@@ -407,7 +407,6 @@ end
 #
 # Add more architectures as you desire.
 
-elup1(x) = elu.(x) .+ 1.00001f0
 square(x) = x.^2
 
 architectures = Dict(
@@ -545,7 +544,7 @@ function buildModel(;
     optimizer_names::Array{String,1}=["ADAM"],
     learning_rates::Array{Float64,1}=[0.001],
     l1_regularizations::Array{Float64,1}=[0.0],
-    activations=[gelu],
+    activations=[elu],
     model_approach::ModelApproach,
     max_epochs=1000,
     batch_sizes::Array{Int64,1}=[256],
@@ -754,7 +753,7 @@ end
         distribution,
         l1_regularization,
         l2_regularization,
-        activation=gelu
+        activation=elu
     )
 
 Train a model for a specified number of epochs and stopping early
@@ -778,7 +777,7 @@ number of epochs.
 
 """
 function trainModel(;
-    activation=gelu,
+    activation=elu,
     distribution,
     early_stopping_limit::Number=25,
     epochs::Number=10,
