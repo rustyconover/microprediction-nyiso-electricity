@@ -36,6 +36,8 @@ function retrieveNYISOLoadForecasts()
     end
 end
 
+
+cached_nyiso_forecast = missing
 """
 loadNYISOLoadForecasts()
 
@@ -44,6 +46,10 @@ TimeArray.  Also deal with daylight savings time from the NYISO.
 
 """
 function loadNYISOLoadForecasts()
+    global cached_nyiso_forecast
+    if cached_nyiso_forecast !== missing
+        return cached_nyiso_forecast
+    end
     forecastsByZone::Dict{Symbol,Dict{DateTime,Number}} = Dict()
 
 # All of the forecasts will exist in a directory, and they should be loaded
@@ -137,5 +143,7 @@ function loadNYISOLoadForecasts()
     end
     forecast_zone_names = map(x -> Symbol(translations[x]), forecast_zone_names)
 
-    return TimeArray(interpolated_times, v, collect(forecast_zone_names))
+    result = TimeArray(interpolated_times, v, collect(forecast_zone_names))
+    cached_nyiso_forecast = result
+    return result
 end

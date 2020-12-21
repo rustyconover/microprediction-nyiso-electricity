@@ -163,7 +163,7 @@ forecast_products = [
     Dict("name" => "Temperature", "level" => 0),
     Dict("name" => "Surface pressure"),
     Dict("name" => "2 metre dewpoint temperature", "level" => 2),
-    Dict("name" => "Relative humidity", "level" => 0, "typeOfLevel" => "unknown"),
+    Dict("name" => "2 metre relative humidity", "level" => 2),
     Dict("name" => "10 metre U wind component", "level" => 10),
     Dict("name" => "10 metre V wind component", "level" => 10),
     Dict("name" => "Downward short-wave radiation flux"),
@@ -213,6 +213,7 @@ include("plots.jl")
 
 include("model-creation.jl")
 include("loss-functions.jl")
+include("serialize-to-js.jl")
 
 """
     loadStream(forecast_locations,
@@ -411,21 +412,21 @@ square(x) = x.^2
 
 architectures = Dict(
     CRPSRegressionSeperate => [
-("128-32-32-1-square", function (input_count, activation, l1_regularization, l2_regularization)
+("128-64-64-1-square", function (input_count, activation)
     base_model = Chain(
         Dense(input_count, 128, activation),
-        Dense(128, 32, activation),
-        Dense(32, 32, activation),
-        Dense(32, 32, activation),
-        Dense(32, 1),
+        Dense(128, 64, activation),
+        Dense(64, 64, activation),
+        Dense(64, 64, activation),
+        Dense(64, 1),
     )
 
     distribution_model = Chain(
         Dense(input_count, 128, activation),
-        Dense(128, 32, activation),
-        Dense(32, 32, activation),
-        Dense(32, 32, activation),
-        Dense(32, 128, activation),
+        Dense(128, 64, activation),
+        Dense(64, 64, activation),
+        Dense(64, 64, activation),
+        Dense(64, 128, activation),
         Dense(128, length(fixed_quantiles), squre)
      )
 
@@ -435,14 +436,14 @@ end),
 
     ],
     CRPSRegression => [
-          ("128-32-32-32-128", function (input_count, activation, l1_regularization, l2_regularization)
+          ("128-64-64-64-128", function (input_count, activation)
 
     model = Chain(
               Dense(input_count, 128, activation),
-              Dense(128, 32, activation),
-              Dense(32, 32, activation),
-              Dense(32, 32, activation),
-              Dense(32, 128, activation),
+              Dense(128, 64, activation),
+              Dense(64, 64, activation),
+              Dense(64, 64, activation),
+              Dense(64, 128, activation),
               Dense(128, 1 + length(fixed_quantiles))
           )
 
@@ -450,14 +451,14 @@ end),
 end),
     ],
     QuantileRegression => [
-         ("128-32-32-32-128",
-         function (input_count, activation, l1_regularization, l2_regularization)
+         ("128-64-64-64-128",
+         function (input_count, activation)
     model = Chain(
              Dense(input_count, 128, activation),
-             Dense(128, 32, activation),
-             Dense(32, 32, activation),
-             Dense(32, 32, activation),
-             Dense(32, 128, activation),
+             Dense(128, 64, activation),
+             Dense(64, 64, activation),
+             Dense(64, 64, activation),
+             Dense(64, 128, activation),
              Dense(128, 1 + length(fixed_quantiles))
          );
     return (model, Flux.params(model))
@@ -465,19 +466,19 @@ end),
     ],
     ClosestPoint => [
         ("100-100",
-        function (input_count, activation, l1_regularization, l2_regularization)
+        function (input_count, activation)
     model = Chain(
             Dense(input_count, 128, activation),
             Dense(128, 64, activation),
-            Dense(64, 32, activation),
-            Dense(32, 1 + length(fixed_quantiles))
+            Dense(64, 64, activation),
+            Dense(64, 1 + length(fixed_quantiles))
         );
     return (model, Flux.params(model))
 end),
     ],
     ParameterizedDistributionDiff => [
         ("128-64-32-2",
-        function (input_count, activation, l1_regularization, l2_regularization)
+        function (input_count, activation)
     model = Chain(
             Dense(input_count, 128, activation),
             Dense(128, 64, activation),
@@ -500,7 +501,6 @@ end)
         lag_interval,
         [trial_count,
         learning_rates,
-        l1_regularizations,
         activations,
         max_epochs,
         batch_size,
@@ -526,7 +526,6 @@ will be used for.
 and architecture.  This will help solve the randomness inherent in
 initialization of the network.
 - `learning_rates`: An array of learning rates to try
-- `l1_regularizations`: An array of l1 regularization amounts to try
 - `activations`: An array of activation functions to try.
 - `max_epochs`: The maximum number of epochs to train the model for.
 - `batch_size`: The size of the batches used when training the model.
@@ -543,8 +542,7 @@ function buildModel(;
     trial_count::Number=1,
     optimizer_names::Array{String,1}=["ADAM"],
     learning_rates::Array{Float64,1}=[0.001],
-    l1_regularizations::Array{Float64,1}=[0.0],
-    activations=[elu],
+    activations=[relu],
     model_approach::ModelApproach,
     max_epochs=1000,
     batch_sizes::Array{Int64,1}=[256],
@@ -617,19 +615,18 @@ function buildModel(;
             for batch_size in batch_sizes
                 for (architecture, model_builder) in architectures[model_approach]
                     for optimizer_name in optimizer_names
-                        for l1_regularization in l1_regularizations
-                            for activation in activations
+                        for activation in activations
 
-                                for index in 1:trial_count
+                            for index in 1:trial_count
 
-                                    model_name = "lag=$(lag_interval)-batch=$(batch_size)-o=$(optimizer_name)-arch=$(architecture)-lr=$(learning_rate)-t=$index"
+                                model_name = "lag=$(lag_interval)-batch=$(batch_size)-o=$(optimizer_name)-arch=$(architecture)-lr=$(learning_rate)-t=$index"
 
-                                    println(model_name)
+                                println(model_name)
 
-                                    training_loader = Flux.Data.DataLoader(train_x, train_y, batchsize=batch_size, shuffle=true)
-                                    test_loader = Flux.Data.DataLoader(test_x, test_y, batchsize=batch_size, shuffle=true)
+                                training_loader = Flux.Data.DataLoader(train_x, train_y, batchsize=batch_size, shuffle=true)
+                                test_loader = Flux.Data.DataLoader(test_x, test_y, batchsize=batch_size, shuffle=true)
 
-                                    f = @spawn trainModel(
+                                f = @spawn trainModel(
                                 model_name=model_name,
                                 regressors=regressors,
                                 model_builder=model_builder,
@@ -642,19 +639,16 @@ function buildModel(;
                                 learning_rate=learning_rate,
                                 model_approach=model_approach,
                                 early_stopping_limit=60,
-                                batch_size=batch_size,
-                                l1_regularization=l1_regularization,
-                                l2_regularization=0.0)
+                                batch_size=batch_size)
 
-                                    if !haskey(results_by_lag, lag_interval)
-                                        results_by_lag[lag_interval] = Dict()
-                                    end
-
-                                    if !haskey(results_by_lag[lag_interval], model_name)
-                                        results_by_lag[lag_interval][model_name] = []
-                                    end
-                                    push!(results_by_lag[lag_interval][model_name], f)
+                                if !haskey(results_by_lag, lag_interval)
+                                    results_by_lag[lag_interval] = Dict()
                                 end
+
+                                if !haskey(results_by_lag[lag_interval], model_name)
+                                    results_by_lag[lag_interval][model_name] = []
+                                end
+                                push!(results_by_lag[lag_interval][model_name], f)
                             end
                         end
                     end
@@ -751,8 +745,6 @@ end
         early_stopping_limit::UInt=10,
         learning_rate=0.001,
         distribution,
-        l1_regularization,
-        l2_regularization,
         activation=elu
     )
 
@@ -766,8 +758,6 @@ number of epochs.
 - `distribution`: The distribution that being fit by the model's output.
 - `early_stopping_limit`: If loss does not improve on the test set for the number epochs specified, training stops.
 - `epochs`: The maximum number of epochs to train the model
-- `l1_regularization`: The amount of l1 regularlization to use.
-- `l2_regularization`: The amount of l2 regularlization to use.
 - `learning_rate`: The learning rate to use with the optimizer.
 - `model_builder`: A function that builds the model's architecture
 - `model_name`: The name used to identify the model.
@@ -781,8 +771,6 @@ function trainModel(;
     distribution,
     early_stopping_limit::Number=25,
     epochs::Number=10,
-    l1_regularization::Float64=0.0,
-    l2_regularization::Float64=0.0,
     batch_size::Int64,
     learning_rate::Float64,
     optimizer_name::String,
@@ -794,9 +782,8 @@ function trainModel(;
     training_loader::Flux.Data.DataLoader,
     )::ModelTrainResult
 
-    println("Train loader X size:", size(training_loader.data[1]))
-    println("Train loader Y size:", size(training_loader.data[1]))
-
+    # println("Train loader X size:", size(training_loader.data[1]))
+    # println("Train loader Y size:", size(training_loader.data[1]))
 
 #    logger = TBLogger("content/$(model_name)", tb_overwrite)
 
@@ -805,10 +792,10 @@ function trainModel(;
     # regressors used.
     input_count::Int32 = convert(Int32, size(training_loader.data[1], 1))
 
-    println("TL:", size(training_loader.data[1]))
-    println("Input count:", input_count)
+    # println("TL:", size(training_loader.data[1]))
+    # println("Input count:", input_count)
     # Build the actual model.
-    model, model_params = model_builder(input_count, activation, l1_regularization, l2_regularization)
+    model, model_params = model_builder(input_count, activation)
 
     if optimizer_name === "ADAM"
         optimizer = ADAM(learning_rate)
@@ -852,8 +839,6 @@ function trainModel(;
 
     local loss
     local big_loss
-
-    println("Starting stuff ", model_approach)
 
     first = true
     if model_approach === ParameterizedDistributionDiff
@@ -901,10 +886,10 @@ function trainModel(;
         ))
 
 
-#            if last_epoch % 10 == 0
-        foo = @sprintf "%30s\t%4d\ttest=%.4f\ttrain=%.4f\tlead=%.2f\treg=%.2f\tt=%.3f\n" model_name last_epoch test_loss[:total] training_loss[:total] test_loss[:total] - training_loss[:total] test_loss[:reg_loss] train_time
-        print(foo)
-#            end
+        if last_epoch % 10 == 0
+            foo = @sprintf "%30s\t%4d\ttest=%.4f\ttrain=%.4f\tlead=%.2f\treg=%.2f\tt=%.3f\n" model_name last_epoch test_loss[:total] training_loss[:total] test_loss[:total] - training_loss[:total] test_loss[:reg_loss] train_time
+            print(foo)
+        end
 
             # If logging to tensorboard use this.
 

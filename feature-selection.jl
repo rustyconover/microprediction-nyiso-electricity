@@ -70,23 +70,33 @@ function feature_selection_demand(;
     electricity_load_streams = collect(filter(x -> startswith(x, "electricity-load"), keys(Microprediction.get_sponsors(Microprediction.Config()))))
 
     for stream_name in electricity_load_streams
-        for lag_interval in [1,3,12]
+        @sync for lag_interval in [1,3,12]
 
             # FIXME: should only include the cities that are in
             # the particular NYISO zone, otherwise there is a lot
             # of noise.
 
             nyiso_feature_name = replace(replace(stream_name, "electricity-load-nyiso-" => "nyiso_forecast_"), ".json" => "")
-            feature_selection(
+            @async feature_selection(
                 stream_name=stream_name,
-                always_regressors=[
-                    :last_demand,
-                    :temperature,
+                extra_optional_regressors=[
                     Symbol(nyiso_feature_name),
-                    ],
-                never_regressors=convert(Array{Symbol,1}, []),
+                    :last_demand,
+                ],
+                always_regressors=[
+                    :temperature,
+                ],
+                never_regressors=convert(Array{Symbol,1}, [
+                    :visible_diffuse_downward_solar_flux,
+                    :downward_short_wave_radiation,
+                    :low_cloud_cover,
+                    :medium_cloud_cover,
+                    :high_cloud_cover,
+                    :maximum_wind_speed,
+                    :minimum_wind_speed,
+                ]),
                 forecast_locations="city",
-                combination_lengths=0:2,
+                combination_lengths=4:4,
                 filter_locations=contains(stream_name, "overall") ? false : true,
                 include_nyiso=false,
                 lag_interval=lag_interval,
@@ -367,11 +377,19 @@ function feature_selection(;
     trial_count::Number=1,
     always_regressors::Array{Symbol,1},
     never_regressors::Array{Symbol,1}=[],
+    extra_optional_regressors::Array{Symbol,1}=[],
     filter_locations::Bool=false,
     learning_rate::Float64=0.001,
     include_nyiso::Bool=false,
     combination_lengths,
     lag_interval::Number=12)
+
+    final_filename = "feature-selection-$(stream_name)-$(lag_interval).binary"
+
+    # Skip files that exist
+    if isfile(final_filename)
+        return
+    end
 
     # The regressors that are important
     stream = loadStream(stream_name=stream_name,
@@ -380,13 +398,14 @@ function feature_selection(;
                         lag_interval=lag_interval)
 
     optional_regressors = setdiff(keys(available_regressor_names), always_regressors)
-
     optional_regressors = setdiff(optional_regressors, never_regressors)
 
     # Filter out nyiso
     if include_nyiso == false
         optional_regressors = filter(x -> !startswith(String(x), "nyiso"), optional_regressors)
     end
+    optional_regressors = union(optional_regressors, extra_optional_regressors)
+
 
     # Sub-filter the locations base on the stream name.
     if forecast_locations == "city" && filter_locations == true
@@ -433,7 +452,7 @@ function feature_selection(;
         trial_count=trial_count,
         learning_rate=learning_rate)
 
-    serialize("feature-selection-$(stream_name)-$(lag_interval).binary", feature_comparison)
+    serialize(final_filename, feature_comparison)
 end
 
 struct FeatureComparisonResult
@@ -469,20 +488,21 @@ function compareFeaturePerformance(;
     trial_count::Number=16,
     distribution,
     early_stopping_limit::Number=10,
-    batchsize::Number=256,
+    batch_size::Number=256,
     epochs::Number=1000,
-    learning_rate::Float64=0.01)::Array{FeatureComparisonResult,1}
-
+    learning_rate::Float64=0.01)
+   # ::Array{FeatureComparisonResult,1}
     # The point here is to try various combinations of regressors.
     # and figure out the most accurate model, this variable controls
     # how many different regressors will be tried at the same time.
 
-    config_trials = []
 
     all_ideas = reduce(vcat, map(x -> collect(combinations(optional_regressor_names, x)), combo_lengths))
 
     println("Going to try $(length(all_ideas)) different regressor ideas.")
 
+    trial_parameters = []
+    parameter_index = 1
     for idea in all_ideas
         idea = sort([
             idea...,
@@ -492,7 +512,7 @@ function compareFeaturePerformance(;
         idea_column_names = regressor_names_to_columns(idea, stream[1])
         all_regressors = filter(filter_regressors, sort(collect(union(idea_column_names...))))
 
-        println("All regressors: $(all_regressors)")
+        # println("All regressors: $(all_regressors)")
         # Training and test data need to be split, but they shouldn't be chronologially ordered.
         # because if only the recent data was used, it means that the model would be temporally
         # sensitive.
@@ -502,62 +522,82 @@ function compareFeaturePerformance(;
         source_data = convert(Array{Float32}, values(stream[1][data_columns...]))
 
         source_data = shuffleobs(source_data, obsdim=1)
-        train, test = splitobs(source_data, at=0.7, obsdim=1);
+        train, test = splitobs(source_data, at=0.3, obsdim=1);
 
-        # The prediction variable :Demand is at the end.
-        train_x = train[:, 1:end - 1]
-        train_y = train[:, end]
+        predicted_field_count = 1;
 
-        test_x = test[:, 1:end - 1]
-        test_y = test[:, end]
+        # The prediction variable is at the end, but may be one or two values.
+        train_x = train[:, 1:end - predicted_field_count]
+        train_y = train[:, end - (predicted_field_count - 1):end]
 
-        viewize(x) = map(idx -> view(x, idx, :), 1:size(x, 1))
+        test_x = test[:, 1:end - predicted_field_count]
+        test_y = test[:, end - (predicted_field_count - 1):end]
+
+        # Observations are assumed to be the last dimensions, so
+        # flip the data around.
+        train_x = copy(train_x')
+        train_y = copy(train_y')
+
+        test_x = copy(test_x')
+        test_y = copy(test_y')
 
         regressor_list = sort(map(String, idea))
 
-        training_loader = Flux.Data.DataLoader(viewize(train_x), train_y, batchsize=batchsize, shuffle=true)
-        test_loader = Flux.Data.DataLoader(viewize(test_x), test_y, batchsize=batchsize, shuffle=true)
+        training_loader = Flux.Data.DataLoader(train_x, train_y, batchsize=batch_size, shuffle=true)
+        test_loader = Flux.Data.DataLoader(test_x, test_y, batchsize=batch_size, shuffle=true)
 
-        model_builder = (input_count, activation, l1_regularization, l2_regularization) ->
-            Chain(
-                RegularizedDense(Dense(input_count, 64, activation), l1_regularization, l2_regularization),
-                RegularizedDense(Dense(64, 64, activation), 0, 0),
-                RegularizedDense(Dense(64, 32, activation), 0, 0),
+        model_builder = function (input_count, activation)
+            model = Chain(
+                Dense(input_count, 128, activation),
+                Dense(128, 64, activation),
+                Dense(64, 32, activation),
                 Dense(32, 2)
-            )
+            );
+            return (model, Flux.params(model))
+        end
 
         for activation in [gelu]
             model_name = "r=$(join(regressor_list, "-"))"
 
             println(model_name)
 
-            trials = map(1:trial_count) do index
-                @spawn trainModel(
-                        model_name=model_name,
-                        regressors=idea,
-                        model_builder=model_builder,
-                        training_loader=training_loader,
-                        model_approach=ParameterizedDistributionDiff,
-                        test_loader=test_loader,
-                        activation=activation,
-                        epochs=epochs,
-                        distribution=distribution,
-                        learning_rate=learning_rate,
-                        early_stopping_limit=early_stopping_limit,
-                        l1_regularization=0.05,
-                        l2_regularization=0.0)
-            end
+            model_parameters = Dict(
+                :model_name => model_name,
+                :regressors => idea,
+                :model_builder => model_builder,
+                :training_loader => training_loader,
+                :model_approach => ParameterizedDistributionDiff,
+                :test_loader => test_loader,
+                :activation => activation,
+                :epochs => epochs,
+                :distribution => distribution,
+                :optimizer_name => "ADAM",
+                :learning_rate => learning_rate,
+                :early_stopping_limit => early_stopping_limit,
+                :batch_size => batch_size);
 
-            push!(config_trials, trials)
+            trials = map(1:trial_count) do indexes
+                push!(trial_parameters, [parameter_index, indexes, model_parameters])
+            end
+            parameter_index = parameter_index + 1
         end
     end
 
-    # Satisfy all of the futures.
-    println("Waiting for trial results")
+    config_trials = Array{ModelTrainResult,2}(undef, parameter_index - 1, trial_count)
+
+    function run_trial(p)
+        return (p[1], p[2], trainModel(;p[3]...))
+    end
+    trained_results = pmap(run_trial, trial_parameters; retry_delays=zeros(3))
+
+    for record in trained_results
+        config_trials[record[1], record[2]] = record[3];
+    end
+
 
     results = []
-    for ct in config_trials
-        trials = sort(map(fetch, ct), by=x -> x.best_test_loss)
+    for ct in eachrow(config_trials)
+        trials = sort(ct, by=x -> x.best_test_loss)
 
         average_loss = mean(map(x -> x.best_test_loss, trials))
         minimum_loss = trials[1].best_test_loss

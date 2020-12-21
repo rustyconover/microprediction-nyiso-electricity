@@ -50,6 +50,7 @@ function learnH3GribIndexes(
                 continue
             end
             h3_idx = H3.API.geoToH3(H3.Lib.GeoCoord(deg_to_rad(lat), deg_to_rad(lon)), h3_resolution)
+
             if haskey(h3_to_offset, h3_idx)
                 parse_offsets[idx] = h3_to_offset[h3_idx]
             end
@@ -74,7 +75,6 @@ and return the values for the specified H3 indexes.
 function parseGRIBFile(
     filename::AbstractString,
     h3_indexes::Array{UInt64},
-    bounds::Array{Bounds,1},
     parse_offsets::Dict{UInt32,UInt32},
     target_messages)
 

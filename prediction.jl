@@ -16,27 +16,12 @@ forecast_lock = ReentrantLock()
 reverse_z(v, stat) = (v * stat[2]) + stat[1]
 
 
-"""
-    runSavedModel(
-        safe_filename_prefix::String,
-        stream_update_interval::Minute=Dates.Minute(5),
-        stream_name::String,
-        number_of_points::Number=225,
-        lag_interval::Number
-    )
-
-Execute a saved model to produce a set of points that describe
-the predicted distribution.
-
-"""
-function runSavedModel(;
-    identity_name::String,
+function regressorsForModel(;
     save_filename_prefix::String,
     stream_update_interval::Minute=Dates.Minute(5),
     stream_name::String,
     run_start_time::DateTime,
     number_of_points::Int64=225,
-    all_candidates::Bool=false,
     lag_interval::Number)
 
     full_filename = "$(save_filename_prefix)-lag-$(lag_interval).binary"
@@ -104,10 +89,13 @@ function runSavedModel(;
     # Z-score the demand lag.
     zscore_result[:Demand_lag] = (latest_value - saved_model[:stats][:Demand_lag][1]) / saved_model[:stats][:Demand_lag][2]
 
+    println("Last demand", latest_value);
+
     # Get the start time.
     stream_start = saved_model[:stream_start]
     periodic_ticks = round((forecast_target_time - stream_start) / Dates.Millisecond(1000 * 60 * 5))
 
+    println("Periodic tics", periodic_ticks)
     zscore_result[:sin_288] = sin(2 * pi * periodic_ticks / 288)
     zscore_result[:cos_288] = cos(2 * pi * periodic_ticks / 288)
     zscore_result[:sin_2016] = sin(2 * pi * periodic_ticks / 2016)
@@ -117,7 +105,11 @@ function runSavedModel(;
         # Zscore the variable by the same mu and std calculated
         # when the model was trained.
         (mu, std) = saved_model[:stats][c]
-        zscore_result[c] = (values(weather_data[c])[1] - mu) / std
+        v = values(weather_data[c])[1]
+        if contains(String(c), "elmira") && contains(String(c), "temperature")
+        println("$(c) == $(v)")
+        end
+        zscore_result[c] = (v - mu) / std
     end
 
     # Merge in all of the nyiso forecasts.
@@ -131,7 +123,35 @@ function runSavedModel(;
     # Now build the regressor inputs for the model.
     regressor_values = convert(Array{Float32,2}, values(zscored_data[saved_model[:regressors]...]))
 
-    prod_model = saved_model[:model]
+    return vcat(regressor_values...), latest_value
+end
+
+"""
+    runSavedModel(
+        safe_filename_prefix::String,
+        stream_update_interval::Minute=Dates.Minute(5),
+        stream_name::String,
+        number_of_points::Number=225,
+        lag_interval::Number
+    )
+
+Execute a saved model to produce a set of points that describe
+the predicted distribution.
+
+"""
+function runSavedModel(;
+    identity_name::String,
+    save_filename_prefix::String,
+    stream_update_interval::Minute=Dates.Minute(5),
+    stream_name::String,
+    run_start_time::DateTime,
+    number_of_points::Int64=225,
+    all_candidates::Bool=false,
+    lag_interval::Number)
+
+    full_filename = "$(save_filename_prefix)-lag-$(lag_interval).binary"
+
+    saved_model = deserialize(full_filename)
 
 
     if all_candidates === true
@@ -140,9 +160,19 @@ function runSavedModel(;
         models = [(saved_model[:model], saved_model[:model_name])]
     end
 
+    regressors, latest_value = regressorsForModel(
+        save_filename_prefix=save_filename_prefix,
+        stream_update_interval=stream_update_interval,
+        stream_name=stream_name,
+        run_start_time=run_start_time,
+        number_of_points=number_of_points,
+        lag_interval=lag_interval
+    )
     results = []
     for (model, name) in models
-        regressors = vcat(regressor_values...)
+
+        # Lets have some fun and run the model in javascript.
+
         if saved_model[:model_approach] !== CRPSRegressionSeperate
             # All of these model approaches just build a single result
             model_result = model(regressors)
@@ -192,8 +222,10 @@ function runSavedModel(;
         push!(results, Dict(
             :stream_name => saved_model[:stream],
             :points => points,
+            :model_result => model_result,
             :name => name
         ))
+
     end
 
     if all_candidates === false

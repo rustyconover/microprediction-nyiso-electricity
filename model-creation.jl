@@ -16,7 +16,7 @@ function build_demand_stream(;
         forecast_locations=forecast_locations,
         lag_interval=1)
 
-    summarized_feature_selection = collect(summarizeFeatureSelection(3, 5, [stream_name]))
+    summarized_feature_selection = collect(summarizeFeatureSelection(1, 5, [stream_name]))
 
     for (lag_interval, regressors) in summarized_feature_selection
         println("Lag: $(lag_interval) regressors: $(regressors)")
@@ -61,9 +61,6 @@ function build_demand_stream(;
     for (lag_interval, all_feature_names) in feature_selection_preferred
         filtered_regressors[lag_interval] = filter(filter_regressors, all_feature_names)
     end
-
-    delete!(filtered_regressors, 1)
-    delete!(filtered_regressors, 3)
 
     return buildModel(
         model_approach=model_approach,
@@ -161,18 +158,17 @@ end
 function makeDemandStreams()
     all_demand_streams = [
          "electricity-load-nyiso-overall.json",
-
-        # "electricity-load-nyiso-north.json",
-        # "electricity-load-nyiso-mhk_valley.json",
-    #     "electricity-load-nyiso-centrl.json",
-    #     "electricity-load-nyiso-hud_valley.json",
-    #     "electricity-load-nyiso-millwd.json",
-    #     "electricity-load-nyiso-nyc.json",
-    #     "electricity-load-nyiso-capitl.json",
-    #     "electricity-load-nyiso-genese.json",
-    #     "electricity-load-nyiso-west.json",
-    #     "electricity-load-nyiso-dunwod.json",
-    #     "electricity-load-nyiso-longil.json",
+         "electricity-load-nyiso-north.json",
+         "electricity-load-nyiso-nyc.json",
+         "electricity-load-nyiso-mhk_valley.json",
+         "electricity-load-nyiso-centrl.json",
+         "electricity-load-nyiso-hud_valley.json",
+         "electricity-load-nyiso-millwd.json",
+         "electricity-load-nyiso-capitl.json",
+         "electricity-load-nyiso-genese.json",
+         "electricity-load-nyiso-west.json",
+         "electricity-load-nyiso-dunwod.json",
+         "electricity-load-nyiso-longil.json",
      ]
 
     generations = map(all_demand_streams) do stream_name
@@ -180,10 +176,10 @@ function makeDemandStreams()
             @async build_demand_stream(
             stream_name=stream_name,
             model_approach=model_approach,
-            save_filename_prefix="test-2-$(model_approach)-$(stream_name)",
-            batch_sizes=[512],
+            save_filename_prefix="t1-$(model_approach)-$(stream_name)",
+            batch_sizes=[256],
             trial_count=1,
-            max_epochs=100)
+            max_epochs=500)
         end
         return models
     end

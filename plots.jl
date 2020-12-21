@@ -250,9 +250,125 @@ function analyze_model_architectures_for_demand()
     collect(countmap(used_models))
 end
 
-
-
 @enum AnalysisGraphType Area VLines CDF
+
+function analyze_quant_diff()
+    n = now(UTC)
+
+    stream_name = "electricity-load-nyiso-overall.json"
+
+    # Get the latest stream values.
+    read_config = Microprediction.Config()
+    live_lagged_values = Microprediction.get_lagged(read_config, stream_name)
+
+
+    cached_nyiso_forecast = loadNYISOLoadForecasts()
+
+    lag_interval = 12
+    number_of_points = 225
+    all_diffs = []
+
+    @gif for time_offset in (60 * 24 * 1):-5:120
+        t = n - Dates.Minute(time_offset)
+
+        model_approach = CRPSRegression
+
+        save_filename_prefix = "test-2-$(model_approach)-electricity-load-nyiso-overall.json"
+        model_full_filename = "$(save_filename_prefix)-lag-$(lag_interval).binary"
+
+        saved_model = deserialize(model_full_filename)
+
+        regressors, latest_value = regressorsForModel(
+            save_filename_prefix=save_filename_prefix,
+            stream_update_interval=Dates.Minute(5),
+            stream_name=stream_name,
+            run_start_time=t,
+            number_of_points=number_of_points,
+            lag_interval=lag_interval
+        )
+
+        results = runSavedModel(
+                save_filename_prefix=save_filename_prefix,
+                stream_name=stream_name,
+                lag_interval=lag_interval,
+                identity_name="foo",
+                all_candidates=false,
+                run_start_time=t)
+
+
+        writeToJS(saved_model[:model], regressors, saved_model[:stats][:Demand], results[:points], results[:model_result], "tfjs-node")
+        js_output = run(`node /Users/rusty/Development/electricity-modelling/javascript/model2.js`)
+        js_cpu_out = JSON.parsefile("/tmp/model-out.json");
+
+        p = plot(
+            title="NYISO Overall Electricity Demand 1-Hour Ahead CDFs @ $(t)",
+#                titlefontsize=10,
+            ylims=(0, 0.006),
+            xlims=(13000, 22000),
+            size=(900, 900),
+            xlabel="Megawatts",
+            legend=:topright,
+            legendfontsize=12,
+
+        )
+
+        plot!(p,
+        kde(vec(results[:points])),
+        # fillcolor=palette(:Paired_12)[(index * 2 % 12) + 1],
+        # color=palette(:Paired_12)[(index * 2 % 12) + 1],
+        fillalpha=0.5,
+        fillrange=0,
+        width=2,
+       # titlefontsize=10,
+        label="Julia CRPSRegression")
+
+        js_cpu_out = convert(Array{Float32}, js_cpu_out)
+        plot!(p,
+        kde(vec(js_cpu_out)),
+        # fillcolor=palette(:Paired_12)[(index * 2 % 12) + 1],
+        # color=palette(:Paired_12)[(index * 2 % 12) + 1],
+        fillalpha=0.5,
+        fillrange=0,
+        width=2,
+        label="Javascript CRPSRegression")
+
+        actual = values(from(live_lagged_values, t + Dates.Second(3555)))
+
+        vline!(p, [actual[1]],
+        color="red",
+        width=3,
+        label="Actual Value")
+
+        quant_diffs = vec(results[:points]) .- js_cpu_out
+
+        all_diffs = [all_diffs..., quant_diffs...]
+
+        p2 = plot(
+            title="Quantile Forecast Difference @ $(t)",
+#                titlefontsize=10,
+            legend=false,
+            kde(vec(quant_diffs)),
+            ylims=(0, 0.25),
+            fillalpha=0.5,
+            fillrange=0,
+            width=2,
+
+            xlims=(-500, 200),
+        )
+
+        p3 = plot(p, p2, layout=(2, 1),
+
+        size=(1024, 1024)
+        )
+
+
+        p3
+
+    end
+
+    println(minimum(all_diffs))
+    println(maximum(all_diffs))
+end
 
 function analyze_model(
     graph_type::AnalysisGraphType=Area
