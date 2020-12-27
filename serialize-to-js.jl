@@ -1,49 +1,54 @@
+# The goal here is to serialize an entire suite of models.
+# the question is how to serialize the individual models
+# should they be seperate files or one big file.
 
-function writeToJSFull(model_filename)
+function writeToJSFull(model_filename, output_filename)
+
+    # regressors, latest_value = regressorsForModel(
+    #         save_filename_prefix="t1-CRPSRegression-electricity-load-nyiso-overall.json",
+    #         stream_update_interval=Dates.Minute(5),
+    #         stream_name="electricity-load-nyiso-overall.json",
+    #         run_start_time=DateTime("2020-12-26T17:55:00"),
+    #         number_of_points=225,
+    #         lag_interval=1
+    #     );
+
+
+    # julia_results = runSavedModel(
+    #             save_filename_prefix="t1-CRPSRegression-electricity-load-nyiso-overall.json",
+    #             stream_name="electricity-load-nyiso-overall.json",
+    #             lag_interval=1,
+    #             identity_name="foo",
+    #             all_candidates=false,
+    #             run_start_time=DateTime("2020-12-26T17:55:00"))
+
     model_info = deserialize(model_filename)
 
-    regressors, latest_value = regressorsForModel(
-            save_filename_prefix="t1-CRPSRegression-electricity-load-nyiso-overall.json",
-            stream_update_interval=Dates.Minute(5),
-            stream_name="electricity-load-nyiso-overall.json",
-            run_start_time=DateTime("2020-12-20T17:55:00"),
-            number_of_points=225,
-            lag_interval=1
-        );
-
-
-    julia_results = runSavedModel(
-                save_filename_prefix="t1-CRPSRegression-electricity-load-nyiso-overall.json",
-                stream_name="electricity-load-nyiso-overall.json",
-                lag_interval=1,
-                identity_name="foo",
-                all_candidates=false,
-                run_start_time=DateTime("2020-12-20T17:55:00"))
-
-
-    open("/Users/rusty/Development/electricity-modelling/javascript/model2.js.tmp", "w") do out
+    open("/Users/rusty/Development/electricity-modelling/javascript/src/$(output_filename).ts", "w") do out
         write(out, """
-        const tf = require('@tensorflow/tfjs');
+        import * as tf from '@tensorflow/tfjs';
+        import moment from 'moment';
+        import * as qs from 'querystring';
+        import * as microprediction from 'microprediction';
+
         const bent = require('bent');
-        const moment = require('moment');
-        const qs = require('querystring');
         const getJSON = bent('json');
+        const reverse_z = (v: number, data: number[]) => (v * data[1]) + data[0];
+        const zscore = (v: number, data: number[]) => (v - data[0]) / data[1];
 
         """);
-        write(out, "const reverse_z = (v, data) => (v * data[1]) + data[0];\n");
-        write(out, "const zscore = (v, data) => (v - data[0]) / data[1];\n")
 
 #        write(out, "require('@tensorflow/tfjs');\n");
 #        write(out, "tf.setBackend('wasm').then(() => main());");
-        write(out, "main('2020-12-20T18:00:00');\n");
+#        write(out, "main('2020-12-26T18:00:00');\n");
 
-        write(out, """async function main(forecast_time) {
+        write(out, """async function main(forecast_time: string) {
 const ft = moment.utc(forecast_time);
 const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
 """);
 
 
-        write(out, "model = tf.sequential();\n");
+        write(out, "const model = tf.sequential();\n");
         function writeTensor(t)
             if size(t, 2) > 1
                 nice_values = []
@@ -77,7 +82,7 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
         end
 
         # Write out the regressor names.
-        write(out, "model_regressor_names = $(JSON.json(map(x -> String(x), model_info[:regressors])));\n");
+        write(out, "const model_regressor_names = $(JSON.json(map(x -> String(x), model_info[:regressors])));\n");
 
         # The regressor table can be smaller and only include the regressors used
         # by this model, so cut it down.
@@ -103,7 +108,7 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
             return Pair(lowercase(location[1]), string(h3_index, base=16))
         end)
 
-        write(out, "locations_to_h3 = $(JSON.json(locations_to_h3));\n")
+        write(out, "const locations_to_h3 = $(JSON.json(locations_to_h3));\n")
 
 
         needed_weather = Set()
@@ -121,14 +126,33 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
             push!(needed_weather, s)
         end
 
-        write(out, "needed_weather_features = $(JSON.json(needed_weather));\n");
+        write(out, "const needed_weather_features = $(JSON.json(needed_weather));\n");
 
         used_regressor_stats = filter(x -> x.first in model_info[:regressors] || x.first == :Demand, model_info[:stats]);
 
-        write(out, "regressor_zscore_stats = $(JSON.json(used_regressor_stats));\n");
+        write(out, "const regressor_zscore_stats: {
+            [variable_name: string]: [number, number]
+        } = $(JSON.json(used_regressor_stats));\n");
 
         # To generate the regressor data for sin_228 and the other periodic functions
         # The start time of the data set needs to be expressed.
+
+#        const julia_regressors = $(JSON.json(regressors));
+
+#        console.log(
+#            "Regressor diffs"
+#        );
+#        for (let j = 0; j < zscored_regressors.length; j++) {
+#            console.log(model_regressor_names[j], zscored_regressors[j] - julia_regressors[j]);
+#        }
+# const julia_points = $(JSON.json(julia_results[:points]));
+
+#        console.log("Results diff");
+#        for (let j = 0; j < points.length; j++) {
+#            console.log(julia_points[0][j] - points[j]);
+#        }
+
+
 
         write(out, """
         const url_parameters = qs.encode({
@@ -137,16 +161,20 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
             h3_indexes: Object.values(locations_to_h3).join(","),
         });
 
-        console.log(url_parameters);
+        // console.log(url_parameters);
 
-        const weather_data = await getJSON(`http://localhost:5000/weather?` + url_parameters);
+        const weather_data: {
+            [product_name: string]: {
+                [h3_index: string]: number
+            }
+        } = await getJSON(`https://api.ionized.cloud/weather?` + url_parameters);
 
-        console.log(weather_data);
+        // console.log(weather_data);
 
-        const flat_weather = {};
+        const flat_weather: { [regressor_name: string]: number } = {};
         // Flatten the weather data into name and values.
 
-        const inverse_locations = {};
+        const inverse_locations: { [h3_index: string]: string } = {};
         for (const [location_name, h3_index] of Object.entries(locations_to_h3)) {
             inverse_locations[h3_index] = location_name.replace(/ /g, "_");
         }
@@ -157,12 +185,9 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
             }
         }
         // Start to build up the regressors.
-
-
         const periodic_ticks = moment.duration(ft.diff(moment(stream_start))).as('minutes') / 5;
 
-
-        const periodic_regressors = {
+        const periodic_regressors: { [name: string]: number } = {
             sin_288: Math.sin(2 * Math.PI * periodic_ticks / 288),
             cos_288: Math.cos(2 * Math.PI * periodic_ticks / 288),
             sin_2016: Math.sin(2 * Math.PI * periodic_ticks / 2016),
@@ -170,20 +195,18 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
         };
 
 
-        const microprediction = require('microprediction');
         const read_config = await microprediction.MicroReaderConfig.create({});
         const reader = new microprediction.MicroReader(read_config);
 
-        const final_regressors = []
+        const final_regressors: number[] = []
         for (const regressor_name of model_regressor_names) {
             if (regressor_name.match(/^hrrr_/)) {
                 const v = flat_weather[regressor_name];
                 if (v == null) {
                     const known_weather_keys = Object.keys(flat_weather)
                     known_weather_keys.sort();
-                    console.log(known_weather_keys.join(","));
+                    // console.log(known_weather_keys.join(","));
                     throw new Error(`Failed to find weather regressor: ` + regressor_name);
-
                 }
                 final_regressors.push(v);
             } else if (periodic_regressors[regressor_name] != null) {
@@ -193,7 +216,7 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
 
                 const first_smaller_index = values.findIndex(v => v[0] < (ft.valueOf() / 1000));
                 final_regressors.push(values[first_smaller_index+1][1]);
-                console.log("Demand value:", values[first_smaller_index+1][1]);
+                // console.log("Demand value:", values[first_smaller_index+1][1]);
             } else if (regressor_name.match(/^nyiso-/)) {
                 const v = weather_data["nyiso"][regressor_name];
                 if (v == null) {
@@ -207,56 +230,44 @@ const stream_start = moment.utc($(JSON.json(model_info[:stream_start])));
 
         const zscored_regressors = model_regressor_names.map((name, idx) => {
             // Don't zscore the periodic regressors.
-            if (!name.match(/^(sin|cos)/)) {
-                console.log("Prezscore: ", name, final_regressors[idx]);
+            if (!name.match(/^(sin|cos)_/)) {
                 return zscore(final_regressors[idx], regressor_zscore_stats[name]);
             } else {
                 return final_regressors[idx];
             }
         });
 
-        const julia_regressors = $(JSON.json(regressors));
 
-        console.log(
-            "Regressor diffs"
-        );
-        for (let j = 0; j < zscored_regressors.length; j++) {
-            console.log(model_regressor_names[j], zscored_regressors[j] - julia_regressors[j]);
+        const result = model.predict(tf.tensor(zscored_regressors, [1, 1, zscored_regressors.length], 'float32'));
+        if(Array.isArray(result)) {
+            throw new Error("Prediction resulted in an unexpected array");
         }
-
-        result = model.predict(tf.tensor(zscored_regressors, [1, 1, zscored_regressors.length], 'float32'));
-        const full_result = result.dataSync();
+        const full_result = result.dataSync() as Float32Array;
 
         // Now that the final results are there, we need to process them.
-        for (i = 1; i < full_result.length; i++) {
+        for (let i = 1; i < full_result.length; i++) {
             full_result[i] = full_result[i] ** 2;
         }
 
         full_result[1] += full_result[0];
-        for (i = 2; i < full_result.length; i++) {
+        for (let i = 2; i < full_result.length; i++) {
             full_result[i] += full_result[i - 1];
         }
-
-        const julia_points = $(JSON.json(julia_results[:points]));
 
         const points = full_result.slice(1)
             .map(v => reverse_z(v, regressor_zscore_stats["Demand"]));
 
-            console.log("Results diff");
-            for (let j = 0; j < points.length; j++) {
-                console.log(julia_points[0][j] - points[j]);
-            }
+        return points;
 
         """)
 
         # Here is where we call the feature vector creator.
 
+
         write(out, "}\n");
 
 
     end
-    mv("/Users/rusty/Development/electricity-modelling/javascript/model2.js.tmp",
-    "/Users/rusty/Development/electricity-modelling/javascript/model2.js", force=true)
 end
 
 
