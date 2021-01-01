@@ -247,14 +247,8 @@ function latestHRRRForecastForTime(target::DateTime,
             symbol_names[index] = field_name
         end
 
-        println(product)
         for (first_value, second_value, field_name) in zip(first_produced_product[2], second_produced_product[2], symbol_names)
             view(field_values[field_name], 1:length(interpolation_range))[1:end] = map(function (minutes)
-                if(product["name"] === "Temperature" && field_name === :hrrr_temperature_0_elmira)
-                    println(field_name);
-                    println("Start value", first_value)
-                    println("End value", second_value)
-                end
                 first_weight = 1.0 - (minutes / 60)
                 (first_weight * first_value) + ((1.0 - first_weight) * second_value)
             end, interpolation_range)

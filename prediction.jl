@@ -83,39 +83,74 @@ function regressorsForModel(;
 
     nyiso_data = nyiso_forecast[rounded_forecast_time]
 
+    raw_regressors::Dict{Symbol,Any} = Dict()
+
     zscore_result::Dict{Symbol,Any} = Dict()
     zscore_result[:datetime] = timestamp(weather_data)
 
     # Z-score the demand lag.
     zscore_result[:Demand_lag] = (latest_value - saved_model[:stats][:Demand_lag][1]) / saved_model[:stats][:Demand_lag][2]
+    raw_regressors[:Demand_lag] = latest_value;
 
-    println("Last demand", latest_value);
+#    println("Last demand", latest_value);
 
     # Get the start time.
     stream_start = saved_model[:stream_start]
     periodic_ticks = round((forecast_target_time - stream_start) / Dates.Millisecond(1000 * 60 * 5))
 
-    println("Periodic tics", periodic_ticks)
+#    println("Periodic tics", periodic_ticks)
     zscore_result[:sin_288] = sin(2 * pi * periodic_ticks / 288)
     zscore_result[:cos_288] = cos(2 * pi * periodic_ticks / 288)
     zscore_result[:sin_2016] = sin(2 * pi * periodic_ticks / 2016)
     zscore_result[:cos_2016] = cos(2 * pi * periodic_ticks / 2016)
 
+    raw_regressors[:sin_288] = zscore_result[:sin_288];
+    raw_regressors[:cos_288] = zscore_result[:cos_288];
+    raw_regressors[:sin_2016] = zscore_result[:sin_2016];
+    raw_regressors[:cos_2016] = zscore_result[:cos_2016];
+
+
     for c in colnames(weather_data)
         # Zscore the variable by the same mu and std calculated
         # when the model was trained.
         (mu, std) = saved_model[:stats][c]
-        v = values(weather_data[c])[1]
-        if contains(String(c), "elmira") && contains(String(c), "temperature")
-        println("$(c) == $(v)")
-        end
-        zscore_result[c] = (v - mu) / std
+        v = values(weather_data[c])[1];
+        zscore_result[c] = (v - mu) / std;
+        raw_regressors[c] = v;
     end
 
     # Merge in all of the nyiso forecasts.
     for c in colnames(nyiso_data)
         (mu, std) = saved_model[:stats][c]
-        zscore_result[c] = (values(nyiso_data[c])[1] - mu) / std
+        v = values(nyiso_data[c])[1]
+        zscore_result[c] = (v - mu) / std;
+        raw_regressors[c] = v;
+    end
+
+    for additional_stream in filter(x -> startswith(String(x), "stream_"), saved_model[:regressors])
+        actual_additional_stream_name = replace(String(additional_stream), "stream_" => "")
+        (mu, std) = saved_model[:stats][additional_stream]
+
+
+        if haskey(cached_latest_values, actual_additional_stream_name)
+            live_additional_values = cached_latest_values[actual_additional_stream_name]
+        else
+            # Get the latest stream values.
+            read_config = Microprediction.Config()
+
+            cached_latest_values[actual_additional_stream_name] =
+            live_additional_values = Microprediction.get_lagged(read_config, actual_additional_stream_name)
+        end
+
+        # Truncate it.
+        live_additional_values = to(live_additional_values, run_start_time)
+
+        # Since the history doesn't name the value in the TimeArray just
+        # deal with this in a hardcoded way.
+        latest_additional_value = values(live_additional_values)[end]
+
+        zscore_result[additional_stream] = (latest_additional_value - mu) /std;
+        raw_regressors[additional_stream] = latest_additional_value;
     end
 
     zscored_data = TimeArray(namedtuple(zscore_result); timestamp=:datetime)
@@ -123,7 +158,14 @@ function regressorsForModel(;
     # Now build the regressor inputs for the model.
     regressor_values = convert(Array{Float32,2}, values(zscored_data[saved_model[:regressors]...]))
 
-    return vcat(regressor_values...), latest_value
+    trimmed_regressors = Dict()
+    for name in saved_model[:regressors]
+        trimmed_regressors[name] = raw_regressors[name]
+    end
+    trimmed_regressors[:Demand_lag] = raw_regressors[:Demand_lag]
+
+
+    return vcat(regressor_values...), trimmed_regressors
 end
 
 """
@@ -160,7 +202,7 @@ function runSavedModel(;
         models = [(saved_model[:model], saved_model[:model_name])]
     end
 
-    regressors, latest_value = regressorsForModel(
+    regressors, raw_regressors = regressorsForModel(
         save_filename_prefix=save_filename_prefix,
         stream_update_interval=stream_update_interval,
         stream_name=stream_name,
@@ -191,7 +233,7 @@ function runSavedModel(;
             # Now do the trick by iterating across the quantile function
             # thanks Peter.
             smidge = 1 / (number_of_points + 2)
-            points = map(x -> reverse_z(quantile(distribution, x), saved_model[:stats][:Demand_diff]) + latest_value, smidge:smidge:1 - (smidge * 2))
+            points = map(x -> reverse_z(quantile(distribution, x), saved_model[:stats][:Demand_diff]) + raw_regressors[:Demand_lag], smidge:smidge:1 - (smidge * 2))
         elseif saved_model[:model_approach] === ClosestPoint
             first_model_result = view(cumsum(vcat(
                 view(model_result, 1:1, :),
@@ -216,7 +258,7 @@ function runSavedModel(;
         end
 
         points_stats = mean_and_std(points)
-        output = @sprintf "%s %s %s %s lag=%d latest=%f points mu=%.2f std=%.2f" name run_start_time identity_name saved_model[:stream] lag_interval latest_value points_stats[1] points_stats[2]
+        output = @sprintf "%s %s %s %s lag=%d points mu=%.2f std=%.2f" name run_start_time identity_name saved_model[:stream] lag_interval points_stats[1] points_stats[2]
         println(output)
 
         push!(results, Dict(

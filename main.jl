@@ -251,7 +251,11 @@ function loadStream(;
     skip_nyiso::Bool=false,
     stream_name::String,
     lag_interval::Number=1,
+    outlier_limit::Float64=0.3,
+    additional_streams::Array{String,1}=convert(Array{String,1}, []),
     )
+
+
 
 
     stream = MicropredictionHistory.loadStream(MICROPREDICTION_HISTORY_DIRECTORY,
@@ -259,17 +263,16 @@ function loadStream(;
             load_live_data=load_live_data)
 
     # Since the TimeArray may not contain all of the values since the stream may stop ticking,
-    # lets make sure it does, so the values will be imputed by R.
+    # lets make sure it does, so the values will be impute.
 
     last_value = missing
     function filter_outliers(x)
         if ismissing(x)
             return x
         end
-        # It is unreasonable to have the load increase by 30 percent
-        # over a single interval, if this happens filter it out since it is likely
-        # a measurement error.
-        if !ismissing(last_value) && abs(x - last_value) / last_value > 0.30
+        # If the stream change is larger than the outlier limit it may make sense
+        # to impute a new value for the stream.
+        if !ismissing(last_value) && abs(x - last_value) / last_value > outlier_limit
             return missing
         end
         last_value = x
@@ -277,7 +280,7 @@ function loadStream(;
     end
 
     stream_values = values(stream.data)
-    if match(r"^demand", stream_name) != nothing
+    if match(r"^demand", stream_name) !== nothing
         stream_values = map(filter_outliers, stream_values)
     end
     stream_values = Impute.interpolate(stream_values)
@@ -291,6 +294,25 @@ function loadStream(;
         # Load the existing ISO forecast.
         iso_forecasts = loadNYISOLoadForecasts()
         stream = merge(stream, lag(iso_forecasts, lag_interval), :inner)
+    end
+
+
+    # If there are additional streams indicated add them.
+    for additional_stream_name in additional_streams
+        additional_stream = MicropredictionHistory.loadStream(MICROPREDICTION_HISTORY_DIRECTORY,
+            additional_stream_name,
+            load_live_data=load_live_data)
+
+        additional_stream_values = values(additional_stream.data)
+        additional_stream_values = Impute.interpolate(additional_stream_values)
+
+        additional_stream = TimeArray(timestamp(additional_stream.data), convert(Array{Float64,1}, additional_stream_values), ["stream_$(additional_stream_name)"])
+
+        # Only deal with stream data after the start date.
+        additional_stream = from(additional_stream, MICROPREDICTION_HISTORY_START_DATE)
+
+        # Merge the lagged additional stream values.
+        stream = merge(stream, lag(additional_stream, lag_interval))
     end
 
 
@@ -546,6 +568,7 @@ function buildModel(;
     model_approach::ModelApproach,
     max_epochs=1000,
     batch_sizes::Array{Int64,1}=[256],
+    additional_streams::Array{String,1}=[],
     save_filename_prefix::String)
 
     viewize(x) = map(idx -> view(x, idx, :), 1:size(x, 1))
@@ -562,6 +585,7 @@ function buildModel(;
 
         stream = loadStream(stream_name=stream_name,
                             zscore_features=true,
+                            additional_streams=additional_streams,
                             forecast_locations=forecast_locations,
                             lag_interval=lag_interval)
 
@@ -607,9 +631,9 @@ function buildModel(;
         test_y = copy(test_y')
 
 
-        println("Training x: ", size(train_x))
-        println("Training y: ", size(train_y))
-        println(typeof(train_y))
+#        println("Training x: ", size(train_x))
+#        println("Training y: ", size(train_y))
+#        println(typeof(train_y))
 
         for learning_rate in learning_rates
             for batch_size in batch_sizes
@@ -620,8 +644,6 @@ function buildModel(;
                             for index in 1:trial_count
 
                                 model_name = "lag=$(lag_interval)-batch=$(batch_size)-o=$(optimizer_name)-arch=$(architecture)-lr=$(learning_rate)-t=$index"
-
-                                println(model_name)
 
                                 training_loader = Flux.Data.DataLoader(train_x, train_y, batchsize=batch_size, shuffle=true)
                                 test_loader = Flux.Data.DataLoader(test_x, test_y, batchsize=batch_size, shuffle=true)
@@ -638,7 +660,7 @@ function buildModel(;
                                 optimizer_name=optimizer_name,
                                 learning_rate=learning_rate,
                                 model_approach=model_approach,
-                                early_stopping_limit=60,
+                                early_stopping_limit=250,
                                 batch_size=batch_size)
 
                                 if !haskey(results_by_lag, lag_interval)
@@ -861,23 +883,23 @@ function trainModel(;
     end
 
     println("Starting training loop")
-#    try
-    for i in 1:epochs
-        last_epoch = i
+    try
+        for i in 1:epochs
+            last_epoch = i
 
             # The data loader won't return the inputs batched together for
             # efficient compution, take care of this by concatenating the
             # batches into a matrix rather than an array of arrays.
 
 #        Flux.trainmode!(model)
-        train_time = @elapsed Flux.train!(loss, model_params, training_loader, optimizer)
+            train_time = @elapsed Flux.train!(loss, model_params, training_loader, optimizer)
         #        Flux.testmode!(model)
 
-        test_loss = big_loss(test_loader.data[1], test_loader.data[2])
-        training_loss = big_loss(training_loader.data[1], training_loader.data[2])
+            test_loss = big_loss(test_loader.data[1], test_loader.data[2])
+            training_loss = big_loss(training_loader.data[1], training_loader.data[2])
 
 
-        push!(tracked_losses, Dict(
+            push!(tracked_losses, Dict(
             :training_total => training_loss[:total],
             :test_total => test_loss[:total],
             :training_regularization => training_loss[:reg_loss],
@@ -886,37 +908,37 @@ function trainModel(;
         ))
 
 
-        if last_epoch % 10 == 0
-            foo = @sprintf "%30s\t%4d\ttest=%.4f\ttrain=%.4f\tlead=%.2f\treg=%.2f\tt=%.3f\n" model_name last_epoch test_loss[:total] training_loss[:total] test_loss[:total] - training_loss[:total] test_loss[:reg_loss] train_time
-            print(foo)
-        end
+            if last_epoch % 10 == 0
+                foo = @sprintf "%30s\t%4d\ttest=%.4f\ttrain=%.4f\tlead=%.2f\treg=%.2f\tt=%.3f\n" model_name last_epoch test_loss[:total] training_loss[:total] test_loss[:total] - training_loss[:total] test_loss[:reg_loss] train_time
+                print(foo)
+            end
 
             # If logging to tensorboard use this.
 
             # Implement some early stopping, persist the model with the best
             # loss on the test set so far.
-        if last_epoch > 1
-            if best_test_loss !== missing && best_test_loss < test_loss[:total]
-                early_stopping_counter = early_stopping_counter + 1
-            elseif (best_test_loss === missing || best_test_loss > test_loss[:total])
-                best_test_loss = test_loss[:total]
-                best_epoch = last_epoch
-                best_model = deepcopy(model)
-                early_stopping_counter = 0
+            if last_epoch > 1
+                if best_test_loss !== missing && best_test_loss < test_loss[:total]
+                    early_stopping_counter = early_stopping_counter + 1
+                elseif (best_test_loss === missing || best_test_loss > test_loss[:total])
+                    best_test_loss = test_loss[:total]
+                    best_epoch = last_epoch
+                    best_model = deepcopy(model)
+                    early_stopping_counter = 0
+                end
+            end
+
+            if early_stopping_counter == early_stopping_limit
+                println("Epoch $(i) Stopping since loss not improving $(model_name) $(early_stopping_limit) best $(best_test_loss) current: $(test_loss)")
+                break
             end
         end
-
-        if early_stopping_counter == early_stopping_limit
-            println("Epoch $(i) Stopping since loss not improving $(model_name) $(early_stopping_limit) best $(best_test_loss) current: $(test_loss)")
-            break
+        if last_epoch == epochs
+            println("Reached epoch training limit $(last_epoch) $(model_name)")
         end
+    catch e
+        println("Error in training: $(e)")
     end
-    if last_epoch == epochs
-        println("Reached epoch training limit $(last_epoch) $(model_name)")
-    end
-#    catch e
-#        println("Error in training: $(e)")
-#    end
     return ModelTrainResult(
         model_name,
         regressors,

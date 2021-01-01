@@ -30,6 +30,7 @@ available_regressor_names = Dict(
     :nyiso_forecast_hud_valley => [Symbol("nyiso-hud_valley")],
     :nyiso_forecast_millwd => [Symbol("nyiso-millwd")],
 
+
     # Weather regressors.
     :relative_humidity => cols_containing("relative_humidity"),
     :surface_pressure => cols_containing("surface_pressure"),
@@ -47,6 +48,15 @@ available_regressor_names = Dict(
     :visible_diffuse_downward_solar_flux => cols_containing("visible_diffuse_downward"),
     :visible_beam_downward_solar_flux => cols_containing("visible_beam_downward"),
 )
+
+nyiso_zone_suffixes = ["longil", "mhk_valley", "nyc", "north", "dunwod", "west",
+"centrl", "capitl", "genese", "hud_valley", "millwd"]
+for stream_suffix in nyiso_zone_suffixes
+    available_regressor_names[Symbol("other_stream_$(stream_suffix)")] =
+        [Symbol("stream_electricity-lbmp-nyiso-$(stream_suffix).json"),
+         Symbol("stream_electricity-load-nyiso-$(stream_suffix).json")
+        ]
+end
 
 
 """
@@ -113,35 +123,50 @@ function feature_selection_lbmp(;
     trial_count::Number=1,
     learning_rate::Float64=0.001)
 
-    electricity_load_streams = collect(filter(x -> startswith(x, "electricity-lbmp"), keys(Microprediction.get_sponsors(Microprediction.Config()))))
+    electricity_load_streams = ["electricity-lbmp-nyiso-nyc.json"]
+
+#    collect(filter(x -> startswith(x, "electricity-lbmp"), keys(Microprediction.get_sponsors(Microprediction.Config()))))
 
     for stream_name in electricity_load_streams
-        for lag_interval in [1,3,12]
+        @sync for lag_interval in [1]
 
             # FIXME: should only include the cities that are in
             # the particular NYISO zone, otherwise there is a lot
             # of noise.
 
-            nyiso_feature_name = replace(replace(stream_name, "electricity-lbmp-nyiso-" => "nyiso_forecast_"), ".json" => "")
-            nyiso_feature_name = replace(nyiso_feature_name, "npx" => "nyc")
-            feature_selection(
+            nyiso_feature_name = replace(replace(stream_name, r"electricity-(load|lbmp)-nyiso-" => "nyiso_forecast_"), ".json" => "")
+            @async feature_selection(
                 stream_name=stream_name,
+                learning_rate=0.001,
+                extra_optional_regressors=[
+                    :other_stream_longil,
+                    :other_stream_dunwod,
+                ],
                 always_regressors=[
+                    Symbol(nyiso_feature_name),
+                    :temperature,
+                    :daily_cycle,
                     :last_demand,
                     :temperature,
-                    Symbol(nyiso_feature_name),
-                    ],
+                    :wind_components,
+                ],
+                additional_streams=vcat(
+                    map(x -> "electricity-lbmp-nyiso-$(x).json", nyiso_zone_suffixes),
+                    map(x -> "electricity-load-nyiso-$(x).json", nyiso_zone_suffixes),
+                ),
                 never_regressors=convert(Array{Symbol,1}, [
-                    :downward_short_wave_radiation,
-                    :total_cloud_cover,
-                    :low_cloud_cover,
-                    :high_cloud_cover,
-                    :medium_cloud_cover,
                     :visible_diffuse_downward_solar_flux,
                     :visible_beam_downward_solar_flux,
+                    :downward_short_wave_radiation,
+                    :average_wind_speed,
+                    :low_cloud_cover,
+                    :medium_cloud_cover,
+                    :high_cloud_cover,
+                    :maximum_wind_speed,
+                    :minimum_wind_speed,
                 ]),
                 forecast_locations="city",
-                combination_lengths=0:2,
+                combination_lengths=5:7,
                 filter_locations=contains(stream_name, "overall") ? false : true,
                 include_nyiso=false,
                 lag_interval=lag_interval,
@@ -175,16 +200,22 @@ function feature_selection_solar_power(;
     for lag_interval in [1,3,12]
         feature_selection(
             stream_name="electricity-fueltype-nyiso-other_renewables.json",
-            always_regressors=[
-                :last_demand,
-                :low_cloud_cover,
-                :temperature],
-            never_regressors=[
-                    :daily_cycle,
-                    :weekly_cycle
-                ],
+            extra_optional_regressors=convert(Array{Symbol,1}, []),
+            always_regressors=convert(Array{Symbol,1},[
+
+            ]),
+            never_regressors=convert(Array{Symbol,1},[
+            :wind_components,
+            :minimum_wind_speed,
+            :maximum_wind_speed,
+            :average_wind_speed,
+            :daily_cycle,
+            :weekly_cycle,
+            :dewpoint_temperature,
+            :relative_humidity,
+            ]),
             forecast_locations="solar",
-            combination_lengths=0:2,
+            combination_lengths=3:4,
             include_nyiso=false,
             lag_interval=lag_interval,
             trial_count=trial_count,
@@ -216,15 +247,12 @@ function feature_selection_wind_power(;
     for lag_interval in [1,3,12]
         feature_selection(
             stream_name="electricity-fueltype-nyiso-wind.json",
-            always_regressors=[
-                :last_demand,
-                :average_wind_speed,
-                :wind_components,
-                :relative_humidity],
+            extra_optional_regressors=convert(Array{Symbol,1}, []),
+            always_regressors=convert(Array{Symbol,1},[
+            ]),
             never_regressors=[
                 :daily_cycle,
                 :weekly_cycle,
-
                 :downward_short_wave_radiation,
                 :total_cloud_cover,
                 :low_cloud_cover,
@@ -234,7 +262,7 @@ function feature_selection_wind_power(;
                 :visible_beam_downward_solar_flux,
             ],
             forecast_locations="wind",
-            combination_lengths=0:2,
+            combination_lengths=3:5,
             include_nyiso=false,
             lag_interval=lag_interval,
             trial_count=trial_count,
@@ -377,6 +405,7 @@ function feature_selection(;
     trial_count::Number=1,
     always_regressors::Array{Symbol,1},
     never_regressors::Array{Symbol,1}=[],
+    additional_streams::Array{String,1}=[],
     extra_optional_regressors::Array{Symbol,1}=[],
     filter_locations::Bool=false,
     learning_rate::Float64=0.001,
@@ -394,6 +423,7 @@ function feature_selection(;
     # The regressors that are important
     stream = loadStream(stream_name=stream_name,
                         zscore_features=true,
+                        additional_streams=additional_streams,
                         forecast_locations=forecast_locations,
                         lag_interval=lag_interval)
 
@@ -405,7 +435,6 @@ function feature_selection(;
         optional_regressors = filter(x -> !startswith(String(x), "nyiso"), optional_regressors)
     end
     optional_regressors = union(optional_regressors, extra_optional_regressors)
-
 
     # Sub-filter the locations base on the stream name.
     if forecast_locations == "city" && filter_locations == true
@@ -439,7 +468,6 @@ function feature_selection(;
     else
         filter_regressors = (regressor_full_name) -> true
     end
-
 
     feature_comparison = compareFeaturePerformance(;
         stream=stream,
@@ -499,6 +527,8 @@ function compareFeaturePerformance(;
 
     all_ideas = reduce(vcat, map(x -> collect(combinations(optional_regressor_names, x)), combo_lengths))
 
+    println("Optional regressors")
+    println(optional_regressor_names)
     println("Going to try $(length(all_ideas)) different regressor ideas.")
 
     trial_parameters = []
@@ -559,7 +589,7 @@ function compareFeaturePerformance(;
         for activation in [gelu]
             model_name = "r=$(join(regressor_list, "-"))"
 
-            println(model_name)
+            # println(model_name)
 
             model_parameters = Dict(
                 :model_name => model_name,
@@ -588,7 +618,12 @@ function compareFeaturePerformance(;
     function run_trial(p)
         return (p[1], p[2], trainModel(;p[3]...))
     end
-    trained_results = pmap(run_trial, trial_parameters; retry_delays=zeros(3))
+    trained_results = pmap(run_trial, trial_parameters; retry_delays=zeros(3),
+
+    on_error=function ()
+
+    end
+    )
 
     for record in trained_results
         config_trials[record[1], record[2]] = record[3];
@@ -655,11 +690,9 @@ function summarizeFeatureSelection(
 
         regressor_usage = sort(collect(countmap(reduce(vcat, regressor_usage))), by=x -> x[2], rev=true)
 
-        top_regressors_per_interval[lag_interval] = map(x -> x[1], regressor_usage[1:top_n_regressors])
+        top_regressors_per_interval[lag_interval] = map(x -> x[1], regressor_usage[1:min(top_n_regressors, length(regressor_usage))])
     end
 
     return top_regressors_per_interval
 end
 
-
-#    demand_streams = filter(x -> startswith(x, "electricity-load"), keys(Microprediction.get_sponsors(Microprediction.Config())))

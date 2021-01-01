@@ -273,7 +273,7 @@ function analyze_quant_diff()
 
         model_approach = CRPSRegression
 
-        save_filename_prefix = "test-2-$(model_approach)-electricity-load-nyiso-overall.json"
+        save_filename_prefix = "t1-$(model_approach)-electricity-load-nyiso-overall.json"
         model_full_filename = "$(save_filename_prefix)-lag-$(lag_interval).binary"
 
         saved_model = deserialize(model_full_filename)
@@ -371,27 +371,60 @@ function analyze_quant_diff()
 end
 
 function analyze_model(
-    graph_type::AnalysisGraphType=Area
+    graph_type::AnalysisGraphType=Area,
+    stream_name::String="electricity-fueltype-nyiso-wind.json",
+    lag_interval::Number=12,
 )
     n = now(UTC)
 
-    stream_name = "electricity-load-nyiso-overall.json"
 
     # Get the latest stream values.
     read_config = Microprediction.Config()
     live_lagged_values = Microprediction.get_lagged(read_config, stream_name)
 
-
     cached_nyiso_forecast = loadNYISOLoadForecasts()
+
+    all_values::Array{Float32,1} = convert(Array{Float32,1}, [])
+
+    #        ParameterizedDistributionDiff, QuantileRegression
+    model_approaches = [CRPSRegression]
+
+    for time_offset in (60 * 24 * 1.5):(-5):60
+        t = n - Dates.Minute(time_offset)
+
+
+        all_results = map(model_approaches) do model_approach
+            results = runSavedModel(
+                save_filename_prefix="t1-$(model_approach)-$(stream_name)",
+                stream_name=stream_name,
+                lag_interval=lag_interval,
+                identity_name="foo",
+                all_candidates=false,
+                run_start_time=t)
+
+
+            push!(all_values, maximum(results[:points]))
+            push!(all_values, minimum(results[:points]))
+        end
+    end
+
+    push!(all_values, minimum(values(live_lagged_values)))
+    push!(all_values, maximum(values(live_lagged_values)))
+
+
+#    xlims = (minimum(all_values) * 0.9, maximum(all_values) * 1.1)
+    xlims = (0, 100)
+    println("Lims", xlims)
+
 
     @gif for time_offset in (60 * 24 * 1.5):-5:60
         t = n - Dates.Minute(time_offset)
 
-        all_results = map([CRPSRegression, ParameterizedDistributionDiff, QuantileRegression]) do model_approach
+        all_results = map(model_approaches) do model_approach
             results = runSavedModel(
-                save_filename_prefix="test-1-$(model_approach)-electricity-load-nyiso-overall.json",
+                save_filename_prefix="t1-$(model_approach)-$(stream_name)",
                 stream_name=stream_name,
-                lag_interval=12,
+                lag_interval=lag_interval,
                 identity_name="foo",
                 all_candidates=false,
                 run_start_time=t)
@@ -400,15 +433,14 @@ function analyze_model(
 
         plots = []
         actual = values(from(live_lagged_values, t + Dates.Second(3555)))
-        actual_nyiso = values(from(cached_nyiso_forecast[Symbol("nyiso-overall")], t + Dates.Second(3555)))
-
+#        actual_nyiso = values(from(cached_nyiso_forecast[Symbol("nyiso-overall")], t + Dates.Second(3555)))
 
         if graph_type === CDF
             p = plot(
-                title="NYISO Overall Electricity Demand 1-Hour Ahead CDFs @ $(t)",
+                title="$(stream_name) lag: $(lag_interval) Ahead CDFs @ $(t)",
                 titlefontsize=14,
                 legend=:topleft,
-                xlims=(14000, 21000),
+                xlims=xlims,
                 size=(900, 600)
             )
             for (index, (approach, result)) in enumerate(all_results)
@@ -420,10 +452,10 @@ function analyze_model(
             p
         else
             p = plot(
-                title="NYISO Overall Electricity Demand 1-Hour Ahead CDFs @ $(t)",
+                title="$(stream_name) lag: $(lag_interval) Ahead CDFs @ $(t)",
 #                titlefontsize=10,
                 legend=:topleft,
-                xlims=(12000, 21000),
+                xlims=xlims,
                 size=(900, 900)
             )
 
@@ -436,10 +468,10 @@ function analyze_model(
                 fillalpha=0.25,
                 fillrange=0,
                 ylims=(0, 0.004),
-                xlims=(12000, 21000),
+                xlims=xlims,
                 xlabel="Megawatts",
-                legend=:outertopright,
-                title="NYISO Overall Electricity Demand 1-Hour Ahead @ $(t)",
+                legend=:topright,
+                title="$(stream_name) 1-Hour Ahead @ $(t)",
 #                titlefontsize=10,
                 label="$(approach) $(result[:name])")
                 elseif graph_type === Area
@@ -454,9 +486,9 @@ function analyze_model(
                     width=2,
                     xlabel="Megawatts",
                     ylims=(0, 0.006),
-                    xlims=(13000, 22000),
+                    xlims=xlims,
                     legend=:topright,
-                    title="NYISO Overall Electricity Demand 1-Hour Ahead @ $(t)",
+                    title="$(stream_name) lag: $(lag_interval) @ $(t)",
                     legendfontsize=12,
                    # titlefontsize=10,
                     label="$(approach)")
@@ -483,8 +515,7 @@ function analyze_model(
             push!(plots, p)
 
             plot(plots..., layout=(length(plots), 1),
-            dpi=150,
-             size=(900, 600))
+            dpi=150, size=(900, 600))
         end
     end
 end
